@@ -41,15 +41,61 @@ nvidia-smi
 ## 3. Install dependencies (inside the container)
 
 ```bash
+cd ~/151B_SP26_Competition
 bash dsmlp/install_env.sh
+source .venv/bin/activate
 ```
 
-This installs `vllm==0.8.5.post1`, `transformers`, `accelerate`,
-`bitsandbytes`, `pandas`, and `tqdm` and prints a CUDA visibility check.
+This creates a project `.venv`, pins `numpy<2` (required for scipy in the
+base image), installs `vllm==0.8.5.post1` and `transformers<5`, and prints
+a CUDA capability check.
+
+If `install_env.sh` prints `Installing pinned wheels` (old script) or you
+see `numpy.core.multiarray` / `_ARRAY_API` errors, the pod has numpy 2.x in
+`~/.local` and no `.venv`. **Sync the repo from your laptop first**, then:
+
+```bash
+cd ~/151B_SP26_Competition
+bash dsmlp/bootstrap_venv.sh    # preferred one-shot fix
+source .venv/bin/activate
+python -c "import numpy, transformers; print(numpy.__version__, transformers.__version__)"
+# expect: 1.26.x  4.xx  (NOT 2.x / 5.x)
+```
+
+From your laptop (replace `USERNAME`):
+
+```bash
+rsync -av --exclude .venv --exclude .git \
+  ~/path/to/151B_SP26_Competition/ \
+  USERNAME@dsmlp-login.ucsd.edu:~/151B_SP26_Competition/
+```
+
+If `.venv` already exists but imports fail:
+
+```bash
+bash dsmlp/fix_broken_env.sh
+source .venv/bin/activate
+```
+
+**Always** activate `.venv` before `python scripts/...`. Running bare
+`python` picks up broken packages from `~/.local`.
+
+### Avoid Blackwell / MIG pods for vLLM
+
+If `nvidia-smi` shows **MIG** or **Blackwell** (sm_120), vLLM's PyTorch 2.6
+often will not run kernels. Delete the pod and relaunch requesting Ampere
+or Ada class GPUs:
+
+```bash
+kubectl delete pod YOUR_POD_NAME
+launch-scipy-ml.sh -g 1 -c 8 -m 32 -v a30
+# or: -v b24gb
+```
 
 ## 4. Run the vLLM smoke test
 
 ```bash
+source .venv/bin/activate
 python scripts/smoke_test_vllm.py --n 3
 ```
 
@@ -65,7 +111,8 @@ script will fail fast on the wrong host.
 ## 5. Run validation and build a submission
 
 ```bash
-python scripts/run_validation.py --n_mcq 50 --n_free 100 --n_free_multi 20
+source .venv/bin/activate
+python scripts/run_validation.py --split results/validation/split.jsonl --run_id run01
 python scripts/build_submission.py --test data/private.jsonl --out submission.csv
 ```
 

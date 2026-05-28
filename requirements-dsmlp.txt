@@ -1,0 +1,19 @@
+# Pinned deps for DSMLP GPU containers. Install via dsmlp/install_env.sh
+#
+# numpy must stay <2: the base conda image ships scipy/sklearn built
+# against numpy 1.x; vllm otherwise pulls numpy 2.x and import fails.
+numpy>=1.26.4,<2
+scipy>=1.11,<1.15
+scikit-learn>=1.3,<1.6
+
+vllm==0.8.5.post1
+transformers>=4.51.0,<5.0
+accelerate>=1.0.0,<2.0
+bitsandbytes>=0.43.0,<0.50
+tqdm
+pandas
+pyyaml
+sympy
+antlr4-python3-runtime==4.11
+datasets>=2.20,<4.0
+peft>=0.11,<0.20
