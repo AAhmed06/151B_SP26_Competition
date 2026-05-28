@@ -3,7 +3,8 @@
 # Run inside the GPU pod from repo root:
 #   bash dsmlp/bootstrap_venv.sh
 #
-# Use this if install_env.sh is outdated or pip polluted ~/.local with numpy 2.x.
+# Uses PIP_NO_CACHE_DIR and a single vllm-first requirements install to avoid
+# downloading torch twice (accelerate alone pulls ~3GB of CUDA wheels).
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -11,7 +12,8 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 echo "==> GPU"
 nvidia-smi | head -20
 
-echo "==> Remove stale venv if broken"
+echo "==> Free pip cache (DSMLP home quota is tight)"
+python3 -m pip cache purge 2>/dev/null || true
 rm -rf .venv
 
 echo "==> Create venv"
@@ -19,32 +21,36 @@ python3 -m venv .venv
 # shellcheck disable=SC1091
 source .venv/bin/activate
 
-echo "==> pip + numpy 1.x FIRST"
+export PIP_NO_CACHE_DIR=1
+
+echo "==> numpy 1.x + scipy/sklearn (for transformers import chain)"
 python -m pip install -U pip wheel
 python -m pip install "numpy>=1.26.4,<2"
 python -m pip install "scipy>=1.11,<1.15" "scikit-learn>=1.3,<1.6"
 
-echo "==> transformers 4.x (NOT 5.x) + inference stack"
-python -m pip install \
-  "transformers>=4.51.0,<5.0" \
-  "accelerate>=1.0.0,<2.0" \
-  "bitsandbytes>=0.43.0,<0.50" \
-  tqdm pandas pyyaml sympy "antlr4-python3-runtime==4.11"
-
-echo "==> vllm (may upgrade numpy; we re-pin after)"
-python -m pip install "vllm==0.8.5.post1"
+echo "==> vllm stack in ONE install (torch 2.6 only — do not pip install accelerate first)"
+REQ="requirements-dsmlp.txt"
+if [[ ! -f "$REQ" ]]; then
+  echo "ERROR: $REQ missing. Run: git pull" >&2
+  exit 1
+fi
+python -m pip install -r "$REQ"
 python -m pip install "numpy>=1.26.4,<2"
 
 echo "==> Verify imports (must use THIS python)"
 python - <<'PY'
+import sys
 import numpy as np
 import scipy
 import sklearn
 import transformers
 import torch
-print("python       =", __import__("sys").executable)
+print("python       =", sys.executable)
 print("numpy        =", np.__version__)
 print("transformers =", transformers.__version__)
+print("torch        =", torch.__version__)
+assert np.__version__.startswith("1."), np.__version__
+assert transformers.__version__.startswith("4."), transformers.__version__
 print("cuda         =", torch.cuda.is_available())
 if torch.cuda.is_available():
     print("device       =", torch.cuda.get_device_name(0))

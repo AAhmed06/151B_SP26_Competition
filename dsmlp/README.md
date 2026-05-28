@@ -50,6 +50,20 @@ This creates a project `.venv`, pins `numpy<2` (required for scipy in the
 base image), installs `vllm==0.8.5.post1` and `transformers<5`, and prints
 a CUDA capability check.
 
+### Disk quota (`Disk quota exceeded`)
+
+DSMLP home directories are small (~10–20 GB). The old bootstrap installed
+`accelerate` before `vllm`, which downloaded **torch 2.12 + CUDA 13** (~3 GB)
+and then **torch 2.6 + CUDA 12** again. If install fails mid-way:
+
+```bash
+bash dsmlp/free_disk.sh
+git pull   # get fixed bootstrap_venv.sh
+bash dsmlp/bootstrap_venv.sh
+```
+
+Do **not** `pip install accelerate` before `vllm` manually.
+
 If `install_env.sh` prints `Installing pinned wheels` (old script) or you
 see `numpy.core.multiarray` / `_ARRAY_API` errors, the pod has numpy 2.x in
 `~/.local` and no `.venv`. **Sync the repo from your laptop first**, then:

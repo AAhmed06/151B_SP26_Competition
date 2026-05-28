@@ -23,6 +23,9 @@ python3 -m venv .venv
 # shellcheck disable=SC1091
 source .venv/bin/activate
 
+python3 -m pip cache purge 2>/dev/null || true
+export PIP_NO_CACHE_DIR=1
+
 python -m pip install -U pip wheel
 python -m pip install "numpy>=1.26.4,<2"
 python -m pip install "scipy>=1.11,<1.15" "scikit-learn>=1.3,<1.6"
@@ -30,13 +33,8 @@ python -m pip install "scipy>=1.11,<1.15" "scikit-learn>=1.3,<1.6"
 if [[ -f requirements-dsmlp.txt ]]; then
   python -m pip install -r requirements-dsmlp.txt
 else
-  python -m pip install \
-    "vllm==0.8.5.post1" \
-    "transformers>=4.51.0,<5.0" \
-    "accelerate>=1.0.0,<2.0" \
-    "bitsandbytes>=0.43.0,<0.50" \
-    tqdm pandas pyyaml sympy "antlr4-python3-runtime==4.11" \
-    datasets peft
+  echo "ERROR: requirements-dsmlp.txt missing; git pull or use bootstrap_venv.sh" >&2
+  exit 1
 fi
 
 python -m pip install "numpy>=1.26.4,<2"
