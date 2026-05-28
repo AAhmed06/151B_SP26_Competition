@@ -52,6 +52,9 @@ def _require_cuda() -> None:
 
     Set ``QWEN3_COMP_ALLOW_NO_GPU=1`` to bypass for tests that mock the
     engine. Never set this when actually generating real submissions.
+
+    Uses device_count() instead of is_available() to avoid fully
+    initializing CUDA (which would break vLLM's fork-based engine).
     """
     if os.environ.get("QWEN3_COMP_ALLOW_NO_GPU") == "1":
         return
@@ -61,7 +64,7 @@ def _require_cuda() -> None:
         raise RuntimeError(
             "torch is not installed. Run this inside a DSMLP GPU container."
         ) from exc
-    if not torch.cuda.is_available():
+    if torch.cuda.device_count() == 0:
         raise RuntimeError(
             "CUDA is not available. Inference must run inside a DSMLP GPU "
             "container (launch-scipy-ml.sh -g 1). Set "

@@ -32,9 +32,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing
 import sys
 import time
 from pathlib import Path
+
+if multiprocessing.get_start_method(allow_none=True) != "spawn":
+    multiprocessing.set_start_method("spawn", force=True)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
