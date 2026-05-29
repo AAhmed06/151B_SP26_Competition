@@ -111,6 +111,15 @@ def parse_args() -> argparse.Namespace:
         help="maximum prompt + generation tokens for vLLM",
     )
     p.add_argument(
+        "--max_num_seqs",
+        type=int,
+        default=96,
+        help=(
+            "maximum simultaneous vLLM sequences; lower this if sampler "
+            "warmup OOMs"
+        ),
+    )
+    p.add_argument(
         "--enforce_eager",
         action="store_true",
         help="disable vLLM CUDA graph capture/torch compile warmup to reduce startup VRAM",
@@ -252,6 +261,7 @@ def run_inference(
     seed: int = 0,
     gpu_memory_utilization: float = 0.75,
     max_model_len: int = 16384,
+    max_num_seqs: int = 96,
     enforce_eager: bool = False,
     primary_prompt: str = "strict",
     retry_prompt: str = "commit_now",
@@ -288,6 +298,7 @@ def run_inference(
             seed=seed,
             gpu_memory_utilization=gpu_memory_utilization,
             max_model_len=max_model_len,
+            max_num_seqs=max_num_seqs,
             enforce_eager=enforce_eager,
         )
         sampling = SamplingConfig(
@@ -370,6 +381,7 @@ def main() -> int:
         seed=args.seed,
         gpu_memory_utilization=args.gpu_memory_utilization,
         max_model_len=args.max_model_len,
+        max_num_seqs=args.max_num_seqs,
         enforce_eager=args.enforce_eager,
         primary_prompt=args.primary_prompt,
         retry_prompt=args.retry_prompt,
