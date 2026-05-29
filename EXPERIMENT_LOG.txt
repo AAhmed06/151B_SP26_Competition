@@ -1,7 +1,7 @@
 CSE 151B SP26 Math Reasoning Competition — Experiment & Run Log
 ================================================================
-Last updated: 2026-05-28
-Pod: ala023-540533 (NVIDIA A30, 24GB)
+Last updated: 2026-05-29
+Pod: ala023-3776691 (DSMLP GPU; A30/A5000 class, 24GB)
 Repo: ~/151B_SP26_Competition on DSMLP
 
 This file tracks environment fixes, inference runs, timings, and lessons learned.
@@ -23,7 +23,9 @@ Update it after each experiment.
 2. PIPELINE (src/qwen3_comp/)
 ================================================================
 
-Default production settings (build_submission.py / run_validation.py):
+Single entry point: run_inference.py → scripts/build_submission.py:run_inference()
+
+Default production settings (run_inference.py / run_validation.py):
 
   Prompts:
     primary: strict
@@ -44,18 +46,23 @@ Default production settings (build_submission.py / run_validation.py):
 
   vLLM engine (vllm_runtime.py):
     quantization=bitsandbytes, dtype=bfloat16
-    max_model_len=16384, gpu_memory_utilization=0.85
+    max_model_len=16384, gpu_memory_utilization=0.75 (OOM-safe default)
+    max_num_seqs=96, enforce_eager optional (--enforce_eager if sampler OOM)
     backend=vllm (fallback: transformers + 4-bit)
+    model_id default: Qwen/Qwen3-4B-Thinking-2507 (--model_id for HF checkpoint)
 
   Token budgets (route_max_new_tokens, retry=0):
     MCQ short/medium/long: 2048 / 3072 / 4096
     Free-form: 2048–4096 by difficulty and [ANS] count
     Retry: 6144 or 8192
 
-  Batching:
-    One vLLM generate() for ALL pending questions (primary pass)
-    Second generate() for retry failures only
-    responses.jsonl written AFTER both passes complete (not per-question streaming)
+  Batching (2026-05-29 update):
+    --batch_size N (default 16): pending rows processed in chunks of N
+    Per batch: primary vLLM generate() → retry generate() for failures in batch
+    Checkpoint: append to responses_jsonl + rewrite submission.csv after EACH batch
+    Resume: skip any id already present in responses_jsonl (last line wins on dupes)
+    Tradeoff: batch_size 16 ~13 min/batch but ~12h full run; 64 ~30–40% faster;
+              943 (monolithic) ~2.5–3h but loses all in-flight work on pod death
 
 
 ================================================================
@@ -109,6 +116,34 @@ Issue E: git pull "Disk quota exceeded"
 Issue F: tmux "duplicate session: submit"
   Session already exists; use tmux attach -t submit
   Job may run inside existing session even if current shell has empty $TMUX
+
+Issue G: Forgot source .venv/bin/activate (2026-05-29)
+  Symptoms:
+    NumPy 2.2.6 warning; _ARRAY_API not found
+    ImportError: tokenizers>=0.19,<0.20 required but found tokenizers==0.22.2
+    Traceback paths under /opt/conda/lib/python3.11/... not .venv/
+  Cause:
+    Ran python run_inference.py with conda base Python instead of project venv
+  Fix:
+    cd ~/151B_SP26_Competition && source .venv/bin/activate
+    which python  → must be .../151B_SP26_Competition/.venv/bin/python
+    If broken: bash dsmlp/bootstrap_venv.sh
+  Guard:
+    [[ "$(which python)" == *"/151B_SP26_Competition/.venv/"* ]] || echo "WRONG PYTHON"
+
+Issue H: Checkpoint path confusion → "0 done, 943 pending" (2026-05-29)
+  Symptoms:
+    responses.jsonl.backup exists but run shows 0 done
+    python -c check: Path("responses.jsonl.backup").exists() → False
+  Cause:
+    Full checkpoint lives at results/submission/responses.jsonl.backup (943 lines)
+    NOT at repo root responses.jsonl.backup (missing on pod)
+  Fix:
+    Always pass full path:
+      --responses_jsonl results/submission/responses.jsonl.backup
+    Or: cp results/submission/responses.jsonl.backup responses.jsonl.backup
+  Verify before run:
+    wc -l results/submission/responses.jsonl.backup   # expect 943
 
 
 ================================================================
@@ -185,27 +220,47 @@ Run 2 — mini validation (production-width settings)
     results/validation/mini_a30/summary.json
     results/validation/mini_a30/config.json
 
-Run 3 — FULL private submission (IN PROGRESS at log time)
+Run 3 — FULL private submission (monolithic batch, first pass)
   Date: 2026-05-28, started ~11:10–11:12
-  tmux session: submit (attached in another terminal)
+  Command: build_submission.py (pre run_inference refactor), batch_size=all pending
+  Primary: ~900–950 output tok/s on 943 prompts; ~2–2.5 h primary + ~0.5–1 h retry
+  Completed: 943/943 responses written; verification boxed_rate 70.1% (661/943)
+  Artifact: results/submission/responses.jsonl.backup (943 lines, 6.8 MB) — KEEP THIS
+  Note: 282 rows have response text but no extractable \boxed{} (truncation / no commit)
+
+Run 4 — batched submission with --batch_size 16 (partial)
+  Date: 2026-05-28/29
+  Settings: batch_size=16, strict/commit_now, enforce_eager, max_num_seqs=96
+  Observed: ~773 s (~13 min) per batch of 16 questions
+    Primary ~5 min (~420 output tok/s), retry ~7.5 min (dominates wall time)
+  Stopped after 4 batches (64/943 checkpointed) to increase batch_size
+  Lesson: small batches safe for resume but ~12h ETA for full set
+
+Run 5 — batched submission batch_size=64, 9 batches completed
+  Date: 2026-05-29
+  Command (representative):
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python run_inference.py \
+      --responses_jsonl results/submission/responses.jsonl \
+      --batch_size 64 --enforce_eager --max_num_seqs 96 ...
+  Result: 543 new rows in final burst; 943/943 total in ~656 s for last batch slice
+  Total generation for remaining portion: ~11342 s (~3.1 h) logged for that session
+  Final verification (from backup rebuild):
+    rows=943, empty_responses=0, boxed_responses=661, boxed_rate=70.1%
+  submission.csv built and verified structurally OK for Kaggle upload
+
+Run 6 — rerun no-box rows (attempted 2026-05-29)
+  Goal: recover 282–299 rows missing extractable \boxed{}
+  Prep: filter backup → results/submission/responses_rerun.jsonl
+    Keep rows with truthy rec["boxed"] → 644 kept, 299 to rerun
+    (661 have boxed field non-None; 17 have boxed="" empty string)
   Command:
-    tmux new -s submit
-    cd ~/151B_SP26_Competition
-    source .venv/bin/activate
-    export VLLM_WORKER_MULTIPROC_METHOD=spawn
-    python scripts/build_submission.py \
-      --test data/private.jsonl \
-      --out submission.csv \
-      --responses_jsonl results/submission/responses.jsonl
-  Start state: Submission: 0 done, 943 pending
-  Engine init: ~57s (cached compile)
-  Primary progress snapshot (~11:27):
-    457/3429 completions, 17:00 elapsed
-    ETA bar: ~1:31 remaining on primary
-    ~129 input tok/s, ~957 output tok/s, ~1.84 s/it
-  Note: responses.jsonl stays 0 until primary+retry finish, then bulk write
-  Revised ETA (from bar): ~2–2.5 h total (not initial 6–8 h estimate)
-  Pod: 6h from ~10:16 launch → may finish before pod death
+    python run_inference.py \
+      --responses_jsonl results/submission/responses_rerun.jsonl \
+      --batch_size 64 --primary_prompt commit_now --retry_prompt commit_now \
+      --enforce_eager --max_num_seqs 96
+  Start state: Submission: 644 done, 299 pending — CORRECT
+  Failed: conda Python without .venv (Issue G) before batch 1 finished
+  Status: INCOMPLETE — re-run same command after source .venv/bin/activate
 
 
 ================================================================
@@ -225,6 +280,11 @@ Actual full-run behavior:
 Rule of thumb after this project:
   - Small-n validation time does NOT linearly predict full-batch time
   - Trust vLLM progress bar ETA on 3429 completion scale for primary pass
+  - batch_size 16: ~13 min/batch, ~59 batches → ~12–13 h total
+  - batch_size 64: ~15 batches, est ~7–8 h remaining from scratch
+  - batch_size 943: ~2.5–3.5 h but one pod death loses entire in-flight chunk
+  - Retry pass per batch is slow (~7.5 min) even when primary is ~5 min
+  - vLLM progress: fast primary bar then slow retry bar is EXPECTED behavior
 
 
 ================================================================
@@ -245,22 +305,51 @@ python scripts/build_validation_split.py --out results/validation/mini.jsonl \
   --n_mcq 5 --n_free_single 8 --n_free_multi 2
 python scripts/run_validation.py --split results/validation/mini.jsonl --run_id mini_a30
 
-# Full submission
+# Full submission (preferred entry point)
 tmux new -s submit
-python scripts/build_submission.py --test data/private.jsonl --out submission.csv \
-  --responses_jsonl results/submission/responses.jsonl
+source .venv/bin/activate
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python run_inference.py \
+  --test data/private.jsonl \
+  --out submission.csv \
+  --responses_jsonl results/submission/responses.jsonl \
+  --batch_size 64 \
+  --max_num_seqs 96 \
+  --enforce_eager
 
-# Monitor (jsonl may not grow until end)
+# Rebuild CSV only (no GPU)
+python run_inference.py \
+  --test data/private.jsonl \
+  --out submission.csv \
+  --responses_jsonl results/submission/responses.jsonl.backup \
+  --skip_inference
+
+# Rerun rows missing boxed answers (build filtered checkpoint first)
+python - <<'PY'
+import json
+from pathlib import Path
+src = Path("results/submission/responses.jsonl.backup")
+dst = Path("results/submission/responses_rerun.jsonl")
+kept = [json.loads(l) for l in src.read_text().splitlines() if l.strip() and json.loads(l).get("boxed")]
+dst.write_text("".join(json.dumps(r)+"\n" for r in kept))
+print(len(kept), "kept,", 943-len(kept), "to rerun")
+PY
+python run_inference.py \
+  --responses_jsonl results/submission/responses_rerun.jsonl \
+  --primary_prompt commit_now --retry_prompt commit_now \
+  --batch_size 64 --enforce_eager --max_num_seqs 96
+
+# Monitor (jsonl grows after each batch now)
 tmux ls
 tmux attach -t submit
-ps aux | grep build_submission
 wc -l results/submission/responses.jsonl
+tail -1 results/submission/responses.jsonl
 
 # Resume after pod death
 K8S_TIMEOUT_SECONDS=43200 launch-scipy-ml.sh -g 1 -c 8 -m 32 -v a30
-source .venv/bin/activate
+source .venv/bin/activate   # REQUIRED — see Issue G
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
-# same build_submission.py command — skips ids already in responses.jsonl
+# same run_inference.py command — skips ids already in responses_jsonl
 
 # Copy submission to laptop
 scp USER@dsmlp-login.ucsd.edu:~/151B_SP26_Competition/submission.csv .
@@ -270,18 +359,24 @@ scp USER@dsmlp-login.ucsd.edu:~/151B_SP26_Competition/submission.csv .
 8. RESUME AFTER POD DEATH
 ================================================================
 
-Checkpoint file: results/submission/responses.jsonl
-  - One JSON line per completed question id
-  - Re-run same build_submission.py → prints "N done, M pending"
+Checkpoint file: results/submission/responses.jsonl (or .backup / responses_rerun.jsonl)
+  - One JSON line per completed question id (appended after each batch)
+  - Re-run same run_inference.py → prints "N done, M pending"
+  - CANONICAL FULL RUN: results/submission/responses.jsonl.backup (943 lines)
 
 Not lost on pod death:
   - ~/.cache/huggingface (model weights)
   - ~/151B_SP26_Competition/.venv (usually persists on home dir)
-  - responses.jsonl partial progress
+  - responses.jsonl partial progress (per-batch flush+fsync)
+  - results/submission/responses.jsonl.backup on home dir
 
 Lost on pod death:
-  - In-flight batch (not yet written to jsonl)
+  - In-flight batch only (at most --batch_size questions, not whole run)
   - tmux session (start new attach after relaunch)
+
+Pitfall: filtering checkpoint to "boxed only" then wondering why CSV has empty rows
+  - Filtered responses.jsonl (661 lines) ≠ full backup (943 lines)
+  - Use backup + --skip_inference for complete submission.csv
 
 
 ================================================================
@@ -294,7 +389,18 @@ Lost on pod death:
 - MCQ: vote on letter inside \boxed{}
 - Free-form: comma-separated subanswers in one \boxed{} matching [ANS] order
 - Mini 86.7% boxed < 95% script warning threshold — expect some empty/bad rows
+- Full private run: 661/943 boxed (70.1%); 635/943 sane+voteable (~67% judger-ready)
+- 282 no_boxed_answer: truncation mid-reasoning, rarely complete \boxed{}
+- 17 empty_boxed_answer: \boxed literal in text but truncated before closing brace
+- 9 wrong_subanswer_count: comma grouping wrong for multi-[ANS] (e.g. 41,35,16 x4 ids)
+- Filter for rerun: use rec.get("boxed") truthy, NOT "is not None" (keeps empty strings)
 - Numerical near-misses may score wrong (e.g. 442.86 vs 442.857...) — judger strictness
+
+Future improvements (next iteration):
+  - Add a second repair stage for stubborn no-box rows (n=2 repair samples)
+  - Failure-specific retries (no_box vs wrong_subanswer_count) with custom budgets
+  - Two-stage: solve then deterministic format-only extractor prompt
+  - Optional: stricter free-form answer-count correction for multi-[ANS]
 
 
 ================================================================
@@ -307,22 +413,81 @@ Lost on pod death:
   requirements-dsmlp.txt      — pinned deps (numpy<2, vllm==0.8.5.post1, transformers<5)
   results/validation/mini.jsonl
   results/validation/mini_a30/
-  results/submission/responses.jsonl  — checkpoint (submission run)
-  submission.csv                      — final Kaggle file
-  submission.csv.verification.json    — row/boxed checks
+  run_inference.py                    — single entry point (wraps build_submission.py)
+  scripts/build_submission.py         — run_inference(), --batch_size, --model_id, OOM flags
+  results/submission/responses.jsonl.backup — FULL 943-row checkpoint (canonical)
+  results/submission/responses.jsonl  — partial or latest checkpoint
+  results/submission/responses_rerun.jsonl — 644 good rows; base for 299-row rerun
+  responses.jsonl (repo root)         — filtered 661-row subset (local only; not on pod)
+  submission.csv                      — final Kaggle file (943 rows, ~6.3 MB multiline)
+  submission.verification.json        — row/boxed checks
 
 
 ================================================================
 11. TODO / UPDATE WHEN DONE
 ================================================================
 
-[ ] Full submission completes (943 lines in responses.jsonl)
-[ ] submission.csv verification passes (boxed_rate, row count)
-[ ] Upload to Kaggle
-[ ] Record final wall time and primary/retry split from logs
+[x] Full submission completes (943 lines in responses.jsonl.backup)
+[x] submission.csv structurally valid (943 rows, 0 empty, header id,response)
+[ ] boxed_rate >= 95% (currently 74.44%; 241 rows still unboxed)
+[x] Upload to Kaggle (best score so far: 0.611)
+[x] Run 6 rerun complete (299 no-box rows with commit_now on .venv python)
+[x] Record final wall time for Run 6 after resume
 [ ] Optional: full validation split run_validation.py on 150 public items
-[ ] Optional: tune n_mcq/n_free/temperature if leaderboard weak
+[ ] Optional: implement repair pass / sane-only done criteria in pipeline
 
 ---
 Append new runs below with date, settings, metrics, and path to artifacts.
+
+2026-05-29 — Code changes (pipeline refactor)
+  - Added run_inference() to scripts/build_submission.py (single end-to-end entry)
+  - Added run_inference.py at repo root
+  - Batched checkpointing: --batch_size (default 16), flush+fsync after each batch
+  - New CLI flags: --model_id, --gpu_memory_utilization (0.75), --max_num_seqs,
+    --enforce_eager
+  - Resume skips ids in responses_jsonl; rebuilds submission.csv each batch
+
+2026-05-29 — Run 6 completion + leaderboard result
+  - Rerun base checkpoint built from backup with truthy boxed rows only:
+      src: results/submission/responses.jsonl.backup (943 rows)
+      dst: results/submission/responses_rerun.jsonl (644 kept, 299 rerun)
+  - Command:
+      python run_inference.py \
+        --test data/private.jsonl \
+        --out submission.csv \
+        --responses_jsonl results/submission/responses_rerun.jsonl \
+        --batch_size 64 \
+        --primary_prompt commit_now \
+        --retry_prompt commit_now \
+        --max_num_seqs 96 \
+        --enforce_eager
+  - Result:
+      Checkpointed batch 5/5: 299 new, 943/943 total in 1798.9s
+      Generated 299 questions in 11733.4s (~3.26h)
+      submission verification: rows=943, empty_responses=0, boxed_responses=702,
+      boxed_rate=74.44%, issues=[]
+      improvement vs prior boxed count: 661 -> 702 (+41)
+  - Kaggle score from this submission: 0.611
+
+2026-05-29 — Pipeline upgrade (pre-next run)
+  - Added repair_box prompt family in src/qwen3_comp/prompts.py
+    (format-only extraction from prior draft).
+  - Added repair pass in src/qwen3_comp/self_consistency.py:
+      primary -> retry -> repair_box before final fallback.
+  - Added strict resume filtering + rerun checkpoint utility in
+    scripts/build_submission.py:
+      --resume_require_sane_boxed
+      --rerun_checkpoint_in/--rerun_checkpoint_out
+      --rerun_filter_mode {boxed,sane_boxed}
+      --prepare_rerun_only
+  - Dry-run utility test (local):
+      python run_inference.py --rerun_checkpoint_in responses.jsonl.backup \
+        --rerun_checkpoint_out /tmp/responses_rerun_sane.jsonl \
+        --rerun_filter_mode sane_boxed --prepare_rerun_only
+      output: rows_kept=635, rows_dropped=308
+
+Validation plan before next long private rerun:
+  1) Build sane_boxed checkpoint from latest rerun file
+  2) Run 20-row smoke on public split (commit_now + repair enabled)
+  3) If boxed_rate increases vs current baseline, run full pending private rows
 

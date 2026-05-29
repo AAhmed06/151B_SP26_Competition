@@ -39,6 +39,20 @@ SYSTEM_PROMPT_COMMIT_NOW_MCQ = (
     "End your response with exactly one \\boxed{X} where X is the letter A-J."
 )
 
+SYSTEM_PROMPT_REPAIR_BOX_MATH = (
+    "You are a strict answer formatter. You will receive a math question and a "
+    "draft model response. Extract or infer the final answer from the draft and "
+    "output exactly one final \\boxed{...}. No extra prose. If there are "
+    "multiple [ANS] placeholders, output one boxed group with comma-separated "
+    "sub-answers in placeholder order."
+)
+
+SYSTEM_PROMPT_REPAIR_BOX_MCQ = (
+    "You are a strict answer formatter. You will receive an MCQ question and a "
+    "draft model response. Output exactly one final \\boxed{X} where X is a "
+    "single letter A-J. No extra prose."
+)
+
 SYSTEM_PROMPT_BASELINE_MATH = (
     "You are an expert mathematician. Solve the problem step-by-step. "
     "Put your final answer inside \\boxed{}. If the problem has multiple "
@@ -65,6 +79,10 @@ SYSTEM_PROMPTS: dict[str, dict[str, str]] = {
     "baseline": {
         "math": SYSTEM_PROMPT_BASELINE_MATH,
         "mcq": SYSTEM_PROMPT_BASELINE_MCQ,
+    },
+    "repair_box": {
+        "math": SYSTEM_PROMPT_REPAIR_BOX_MATH,
+        "mcq": SYSTEM_PROMPT_REPAIR_BOX_MCQ,
     },
 }
 
@@ -109,6 +127,34 @@ def build_messages(
     pack = SYSTEM_PROMPTS[prompt_id]
     question: str = item["question"]
     options: Optional[list] = item.get("options")
+
+    if prompt_id == "repair_box":
+        draft_response = item.get("_repair_draft", "")
+        expected = expected_num_answers(item)
+        if options:
+            labels = [chr(65 + i) for i in range(len(options))]
+            opts_text = "\n".join(
+                f"{lbl}. {str(opt).strip()}" for lbl, opt in zip(labels, options)
+            )
+            user_text = (
+                f"Question:\n{question}\n\nOptions:\n{opts_text}\n\n"
+                f"Draft response:\n{draft_response}\n\n"
+                "Return only one final boxed letter, e.g. \\boxed{C}."
+            )
+            system_text = pack["mcq"]
+        else:
+            user_text = (
+                f"Question:\n{question}\n\n"
+                f"Expected number of sub-answers: {expected}\n\n"
+                f"Draft response:\n{draft_response}\n\n"
+                "Return only one final boxed answer, e.g. "
+                "\\boxed{41, 35, 16}."
+            )
+            system_text = pack["math"]
+        return [
+            {"role": "system", "content": system_text},
+            {"role": "user", "content": user_text},
+        ]
 
     if options:
         labels = [chr(65 + i) for i in range(len(options))]

@@ -127,6 +127,22 @@ def _make_request(
     )
 
 
+def _repair_sampling(sampling: SamplingConfig) -> SamplingConfig:
+    """Return conservative decoding settings for format repair."""
+    return SamplingConfig(
+        temperature=min(0.2, sampling.temperature),
+        top_p=min(0.9, sampling.top_p),
+        top_k=min(10, sampling.top_k),
+        repetition_penalty=sampling.repetition_penalty,
+        seed=sampling.seed,
+    )
+
+
+def _repair_max_new_tokens(item: dict) -> int:
+    """Small budget to extract/format an answer from a draft."""
+    return 256 if item.get("options") else 512
+
+
 def generate_with_retry_and_vote(
     engine: VLLMEngine,
     items: list[dict],
@@ -189,6 +205,39 @@ def generate_with_retry_and_vote(
             combined = results[idx].samples + samples
             new_vote = majority_vote(item, combined)
             if new_vote.vote_answer is not None or not results[idx].samples:
+                results[idx] = new_vote
+
+    # Cheap repair pass: if we still have no valid vote key, ask the model to
+    # emit only one final boxed answer from the existing draft response.
+    repair_indices: list[int] = []
+    repair_requests: list[GenerationRequest] = []
+    repair_sampling = _repair_sampling(sampling)
+    for idx, (item, vote) in enumerate(zip(items, results)):
+        if vote.vote_answer is not None:
+            continue
+        draft = vote.response or (vote.samples[0] if vote.samples else "")
+        if not draft:
+            continue
+        repair_item = dict(item)
+        repair_item["_repair_draft"] = draft
+        repair_indices.append(idx)
+        repair_requests.append(
+            _make_request(
+                repair_item,
+                prompt_id="repair_box",
+                max_new_tokens=_repair_max_new_tokens(item),
+                n=1,
+                sampling=repair_sampling,
+            )
+        )
+
+    if repair_requests:
+        repair_outputs = engine.generate(repair_requests)
+        for idx, samples in zip(repair_indices, repair_outputs):
+            item = items[idx]
+            combined = results[idx].samples + samples
+            new_vote = majority_vote(item, combined)
+            if new_vote.vote_answer is not None:
                 results[idx] = new_vote
 
     # Final safety: each result must have a non-empty response field

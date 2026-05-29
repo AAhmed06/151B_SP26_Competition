@@ -127,6 +127,41 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--primary_prompt", default="strict")
     p.add_argument("--retry_prompt", default="commit_now")
     p.add_argument(
+        "--resume_require_sane_boxed",
+        action="store_true",
+        help=(
+            "when resuming, only count checkpoint rows with sane=True and "
+            "a non-empty boxed field as done"
+        ),
+    )
+    p.add_argument(
+        "--rerun_checkpoint_in",
+        default="",
+        help=(
+            "optional source JSONL to filter into a rerun checkpoint "
+            "(e.g., full backup)"
+        ),
+    )
+    p.add_argument(
+        "--rerun_checkpoint_out",
+        default="results/submission/responses_rerun.jsonl",
+        help="destination JSONL for rerun checkpoint filtering",
+    )
+    p.add_argument(
+        "--rerun_filter_mode",
+        choices=("boxed", "sane_boxed"),
+        default="sane_boxed",
+        help=(
+            "boxed: keep rows with non-empty boxed; "
+            "sane_boxed: keep rows with sane=True and non-empty boxed"
+        ),
+    )
+    p.add_argument(
+        "--prepare_rerun_only",
+        action="store_true",
+        help="build rerun checkpoint and exit without inference/CSV build",
+    )
+    p.add_argument(
         "--expected_rows",
         type=int,
         default=EXPECTED_PRIVATE_ROWS,
@@ -140,7 +175,16 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def _load_done(path: Path) -> dict[int, dict]:
+def _is_truthy_boxed(rec: dict) -> bool:
+    boxed = rec.get("boxed")
+    return boxed is not None and str(boxed).strip() != ""
+
+
+def _load_done(
+    path: Path,
+    *,
+    require_sane_boxed: bool = False,
+) -> dict[int, dict]:
     if not path.exists():
         return {}
     done: dict[int, dict] = {}
@@ -150,6 +194,10 @@ def _load_done(path: Path) -> dict[int, dict]:
             if not line:
                 continue
             rec = json.loads(line)
+            if require_sane_boxed and not (
+                bool(rec.get("sane")) and _is_truthy_boxed(rec)
+            ):
+                continue
             done[rec["id"]] = rec
     return done
 
@@ -200,6 +248,47 @@ def _iter_batches(items: list[dict], batch_size: int) -> list[list[dict]]:
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
     return [items[i : i + batch_size] for i in range(0, len(items), batch_size)]
+
+
+def _build_rerun_checkpoint(
+    src_path: Path,
+    dst_path: Path,
+    *,
+    mode: str,
+) -> dict:
+    if not src_path.exists():
+        raise FileNotFoundError(f"source checkpoint not found: {src_path}")
+    kept: list[dict] = []
+    total = 0
+    seen_ids: set[int] = set()
+    with src_path.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            total += 1
+            rec = json.loads(line)
+            keep = _is_truthy_boxed(rec)
+            if mode == "sane_boxed":
+                keep = keep and bool(rec.get("sane"))
+            if not keep:
+                continue
+            qid = rec.get("id")
+            if qid in seen_ids:
+                # keep last occurrence semantics: overwrite previous entry
+                kept = [x for x in kept if x.get("id") != qid]
+            seen_ids.add(qid)
+            kept.append(rec)
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+    dst_path.write_text("".join(json.dumps(r) + "\n" for r in kept))
+    return {
+        "source": str(src_path),
+        "output": str(dst_path),
+        "mode": mode,
+        "total_rows_read": total,
+        "rows_kept": len(kept),
+        "rows_dropped": max(0, total - len(kept)),
+    }
 
 
 def _verify_csv(out_path: Path, items: list[dict], expected_rows: int) -> dict:
@@ -267,6 +356,7 @@ def run_inference(
     retry_prompt: str = "commit_now",
     expected_rows: int = EXPECTED_PRIVATE_ROWS,
     skip_inference: bool = False,
+    resume_require_sane_boxed: bool = False,
 ) -> dict:
     """Run the full private-set pipeline and write the submission CSV.
 
@@ -287,7 +377,10 @@ def run_inference(
             f"{expected_rows}."
         )
 
-    done = _load_done(responses_path)
+    done = _load_done(
+        responses_path,
+        require_sane_boxed=resume_require_sane_boxed,
+    )
     pending = [it for it in items if it.get("id") not in done]
     print(f"Submission: {len(done)} done, {len(pending)} pending")
 
@@ -365,10 +458,25 @@ def run_inference(
 
 def main() -> int:
     args = parse_args()
+    responses_jsonl = args.responses_jsonl
+    if args.rerun_checkpoint_in:
+        rerun_report = _build_rerun_checkpoint(
+            Path(args.rerun_checkpoint_in),
+            Path(args.rerun_checkpoint_out),
+            mode=args.rerun_filter_mode,
+        )
+        print(json.dumps(rerun_report, indent=2))
+        responses_jsonl = args.rerun_checkpoint_out
+    if args.prepare_rerun_only:
+        if not args.rerun_checkpoint_in:
+            print("ERROR: --prepare_rerun_only requires --rerun_checkpoint_in")
+            return 1
+        return 0
+
     report = run_inference(
         test_path=args.test,
         out_path=args.out,
-        responses_jsonl=args.responses_jsonl,
+        responses_jsonl=responses_jsonl,
         model_id=args.model_id,
         backend=args.backend,
         batch_size=args.batch_size,
@@ -387,6 +495,7 @@ def main() -> int:
         retry_prompt=args.retry_prompt,
         expected_rows=args.expected_rows,
         skip_inference=args.skip_inference,
+        resume_require_sane_boxed=args.resume_require_sane_boxed,
     )
     if not report["ok"]:
         return 1
