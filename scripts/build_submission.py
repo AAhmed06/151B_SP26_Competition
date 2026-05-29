@@ -95,6 +95,26 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--top_p", type=float, default=0.95)
     p.add_argument("--top_k", type=int, default=20)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument(
+        "--gpu_memory_utilization",
+        type=float,
+        default=0.75,
+        help=(
+            "fraction of GPU memory vLLM may reserve for weights/KV cache; "
+            "lower this if engine startup OOMs"
+        ),
+    )
+    p.add_argument(
+        "--max_model_len",
+        type=int,
+        default=16384,
+        help="maximum prompt + generation tokens for vLLM",
+    )
+    p.add_argument(
+        "--enforce_eager",
+        action="store_true",
+        help="disable vLLM CUDA graph capture/torch compile warmup to reduce startup VRAM",
+    )
     p.add_argument("--primary_prompt", default="strict")
     p.add_argument("--retry_prompt", default="commit_now")
     p.add_argument(
@@ -230,6 +250,9 @@ def run_inference(
     top_p: float = 0.95,
     top_k: int = 20,
     seed: int = 0,
+    gpu_memory_utilization: float = 0.75,
+    max_model_len: int = 16384,
+    enforce_eager: bool = False,
     primary_prompt: str = "strict",
     retry_prompt: str = "commit_now",
     expected_rows: int = EXPECTED_PRIVATE_ROWS,
@@ -259,7 +282,14 @@ def run_inference(
     print(f"Submission: {len(done)} done, {len(pending)} pending")
 
     if pending and not skip_inference:
-        engine = VLLMEngine(model_id=model_id, backend=backend, seed=seed)
+        engine = VLLMEngine(
+            model_id=model_id,
+            backend=backend,
+            seed=seed,
+            gpu_memory_utilization=gpu_memory_utilization,
+            max_model_len=max_model_len,
+            enforce_eager=enforce_eager,
+        )
         sampling = SamplingConfig(
             temperature=temperature,
             top_p=top_p,
@@ -338,6 +368,9 @@ def main() -> int:
         top_p=args.top_p,
         top_k=args.top_k,
         seed=args.seed,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+        max_model_len=args.max_model_len,
+        enforce_eager=args.enforce_eager,
         primary_prompt=args.primary_prompt,
         retry_prompt=args.retry_prompt,
         expected_rows=args.expected_rows,

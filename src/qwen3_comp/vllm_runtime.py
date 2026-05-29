@@ -91,6 +91,7 @@ class VLLMEngine:
         dtype: str = "bfloat16",
         trust_remote_code: bool = True,
         seed: int = 0,
+        enforce_eager: bool = False,
         backend: str = "vllm",
     ) -> None:
         _require_cuda()
@@ -106,6 +107,7 @@ class VLLMEngine:
             "dtype": dtype,
             "trust_remote_code": trust_remote_code,
             "seed": seed,
+            "enforce_eager": enforce_eager,
         }
 
     def _ensure_loaded(self) -> None:
@@ -134,6 +136,7 @@ class VLLMEngine:
                 trust_remote_code=self._init_kwargs["trust_remote_code"],
                 dtype=self._init_kwargs["dtype"],
                 seed=self._init_kwargs["seed"],
+                enforce_eager=self._init_kwargs["enforce_eager"],
             )
         elif self.backend == "transformers":
             import torch  # noqa: WPS433
