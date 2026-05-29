@@ -24,8 +24,11 @@ Usage (inside the DSMLP GPU container):
         --out submission.csv \\
         --responses_jsonl results/submission/responses.jsonl
 
-``--responses_jsonl`` is a resumable per-question checkpoint, identical
-in shape to the validation harness output.
+``run_inference()`` is the single entry point expected by the competition:
+it loads the configured model, runs private-set inference, applies all
+post-processing/retry/voting logic, checkpoints completed batches, and
+writes the final CSV. ``--responses_jsonl`` is the resumable checkpoint;
+if a GPU pod disconnects, rerunning the same command skips completed ids.
 """
 
 from __future__ import annotations
@@ -33,6 +36,7 @@ from __future__ import annotations
 import argparse
 import json
 import multiprocessing
+import os
 import sys
 import time
 from pathlib import Path
@@ -51,9 +55,10 @@ from qwen3_comp.self_consistency import (  # noqa: E402
     generate_with_retry_and_vote,
     post_hoc_sanity,
 )
-from qwen3_comp.vllm_runtime import VLLMEngine  # noqa: E402
+from qwen3_comp.vllm_runtime import MODEL_ID, VLLMEngine  # noqa: E402
 
 EXPECTED_PRIVATE_ROWS = 943
+DEFAULT_BATCH_SIZE = 16
 
 
 def parse_args() -> argparse.Namespace:
@@ -61,9 +66,26 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--test", default="data/private.jsonl")
     p.add_argument("--out", default="submission.csv")
     p.add_argument(
+        "--model_id",
+        default=MODEL_ID,
+        help=(
+            "HuggingFace model or fine-tuned checkpoint to load. Defaults "
+            "to the designated base model."
+        ),
+    )
+    p.add_argument(
         "--responses_jsonl",
         default="results/submission/responses.jsonl",
         help="resumable per-question checkpoint",
+    )
+    p.add_argument(
+        "--batch_size",
+        type=int,
+        default=DEFAULT_BATCH_SIZE,
+        help=(
+            "number of private rows to finish before writing a resume "
+            "checkpoint"
+        ),
     )
     p.add_argument("--backend", choices=("vllm", "transformers"), default="vllm")
     p.add_argument("--n_mcq", type=int, default=5)
@@ -120,6 +142,37 @@ def _write_csv(out_path: Path, items: list[dict], done: dict[int, dict]) -> None
     df.to_csv(out_path, index=False)
 
 
+def _make_response_record(item: dict, vote) -> dict:
+    sane, reason = post_hoc_sanity(item, vote.response)
+    return {
+        "id": item.get("id"),
+        "is_mcq": bool(item.get("options")),
+        "response": vote.response,
+        "boxed": extract_boxed_content(vote.response),
+        "vote_answer": vote.vote_answer,
+        "vote_count": vote.vote_count,
+        "n_samples": vote.n_samples,
+        "extraction_rate": vote.extraction_rate,
+        "sane": sane,
+        "sanity_reason": reason,
+    }
+
+
+def _append_checkpoint(path: Path, records: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as f:
+        for rec in records:
+            f.write(json.dumps(rec) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def _iter_batches(items: list[dict], batch_size: int) -> list[list[dict]]:
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    return [items[i : i + batch_size] for i in range(0, len(items), batch_size)]
+
+
 def _verify_csv(out_path: Path, items: list[dict], expected_rows: int) -> dict:
     """Read the CSV back and run hard structural checks."""
     import pandas as pd
@@ -162,78 +215,136 @@ def _verify_csv(out_path: Path, items: list[dict], expected_rows: int) -> dict:
     }
 
 
-def main() -> int:
-    args = parse_args()
-    items = load_jsonl(args.test)
-    print(f"Loaded {len(items)} test items from {args.test}")
-    if args.expected_rows and len(items) != args.expected_rows:
+def run_inference(
+    *,
+    test_path: str | Path = "data/private.jsonl",
+    out_path: str | Path = "submission.csv",
+    responses_jsonl: str | Path = "results/submission/responses.jsonl",
+    model_id: str = MODEL_ID,
+    backend: str = "vllm",
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    n_mcq: int = 5,
+    n_free: int = 3,
+    max_retries: int = 1,
+    temperature: float = 0.7,
+    top_p: float = 0.95,
+    top_k: int = 20,
+    seed: int = 0,
+    primary_prompt: str = "strict",
+    retry_prompt: str = "commit_now",
+    expected_rows: int = EXPECTED_PRIVATE_ROWS,
+    skip_inference: bool = False,
+) -> dict:
+    """Run the full private-set pipeline and write the submission CSV.
+
+    This is intentionally the only production entry point: callers do not
+    need to run separate model-loading, generation, post-processing, or CSV
+    steps. Progress is committed to ``responses_jsonl`` after each batch so
+    a disconnected GPU session only loses the in-flight batch.
+    """
+    test_path = Path(test_path)
+    out_path = Path(out_path)
+    responses_path = Path(responses_jsonl)
+
+    items = load_jsonl(test_path)
+    print(f"Loaded {len(items)} test items from {test_path}")
+    if expected_rows and len(items) != expected_rows:
         print(
             f"WARNING: test set has {len(items)} rows, expected "
-            f"{args.expected_rows}."
+            f"{expected_rows}."
         )
 
-    responses_path = Path(args.responses_jsonl)
     done = _load_done(responses_path)
     pending = [it for it in items if it.get("id") not in done]
     print(f"Submission: {len(done)} done, {len(pending)} pending")
 
-    if pending and not args.skip_inference:
-        engine = VLLMEngine(backend=args.backend, seed=args.seed)
+    if pending and not skip_inference:
+        engine = VLLMEngine(model_id=model_id, backend=backend, seed=seed)
         sampling = SamplingConfig(
-            temperature=args.temperature,
-            top_p=args.top_p,
-            top_k=args.top_k,
-            seed=args.seed or None,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            seed=seed or None,
         )
+
+        batches = _iter_batches(pending, batch_size)
+        total_started = len(done)
         t0 = time.time()
-        votes = generate_with_retry_and_vote(
-            engine,
-            pending,
-            primary_prompt_id=args.primary_prompt,
-            retry_prompt_id=args.retry_prompt,
-            n_mcq=args.n_mcq,
-            n_free=args.n_free,
-            sampling=sampling,
-            max_retries=args.max_retries,
-        )
-        elapsed = time.time() - t0
-        print(f"Generated {len(votes)} questions in {elapsed:.1f}s.")
-
-        responses_path.parent.mkdir(parents=True, exist_ok=True)
-        with responses_path.open("a") as f:
-            for item, vote in zip(pending, votes):
-                sane, reason = post_hoc_sanity(item, vote.response)
-                rec = {
-                    "id": item.get("id"),
-                    "is_mcq": bool(item.get("options")),
-                    "response": vote.response,
-                    "boxed": extract_boxed_content(vote.response),
-                    "vote_answer": vote.vote_answer,
-                    "vote_count": vote.vote_count,
-                    "n_samples": vote.n_samples,
-                    "sane": sane,
-                    "sanity_reason": reason,
-                }
-                f.write(json.dumps(rec) + "\n")
+        for batch_idx, batch in enumerate(batches, start=1):
+            batch_t0 = time.time()
+            print(
+                f"Batch {batch_idx}/{len(batches)}: generating {len(batch)} "
+                f"questions ({len(done)}/{len(items)} already checkpointed)"
+            )
+            votes = generate_with_retry_and_vote(
+                engine,
+                batch,
+                primary_prompt_id=primary_prompt,
+                retry_prompt_id=retry_prompt,
+                n_mcq=n_mcq,
+                n_free=n_free,
+                sampling=sampling,
+                max_retries=max_retries,
+            )
+            records = [
+                _make_response_record(item, vote)
+                for item, vote in zip(batch, votes)
+            ]
+            _append_checkpoint(responses_path, records)
+            for rec in records:
                 done[rec["id"]] = rec
+            _write_csv(out_path, items, done)
+            print(
+                f"Checkpointed batch {batch_idx}/{len(batches)}: "
+                f"{len(done) - total_started} new, {len(done)}/{len(items)} "
+                f"total in {time.time() - batch_t0:.1f}s."
+            )
+        print(f"Generated {len(done) - total_started} questions in {time.time() - t0:.1f}s.")
 
-    out_path = Path(args.out)
     _write_csv(out_path, items, done)
 
-    report = _verify_csv(out_path, items, args.expected_rows)
+    report = _verify_csv(out_path, items, expected_rows)
     report_path = out_path.with_suffix(".verification.json")
     report_path.write_text(json.dumps(report, indent=2))
     print(json.dumps(report, indent=2))
 
     if report["issues"]:
         print(f"FAILED: {len(report['issues'])} structural issues; see {report_path}")
-        return 1
+        report["ok"] = False
+        return report
     if report["boxed_rate"] < 0.95:
         print(
             f"WARNING: boxed_rate {report['boxed_rate']:.2%} below 95%; "
             "consider re-running missing rows before uploading."
         )
     print(f"Wrote {out_path} ({report['rows']} rows).")
+    report["ok"] = True
+    return report
+
+
+def main() -> int:
+    args = parse_args()
+    report = run_inference(
+        test_path=args.test,
+        out_path=args.out,
+        responses_jsonl=args.responses_jsonl,
+        model_id=args.model_id,
+        backend=args.backend,
+        batch_size=args.batch_size,
+        n_mcq=args.n_mcq,
+        n_free=args.n_free,
+        max_retries=args.max_retries,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        top_k=args.top_k,
+        seed=args.seed,
+        primary_prompt=args.primary_prompt,
+        retry_prompt=args.retry_prompt,
+        expected_rows=args.expected_rows,
+        skip_inference=args.skip_inference,
+    )
+    if not report["ok"]:
+        return 1
     return 0
 
 

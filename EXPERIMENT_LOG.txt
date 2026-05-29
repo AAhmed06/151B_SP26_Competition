@@ -1,0 +1,328 @@
+CSE 151B SP26 Math Reasoning Competition — Experiment & Run Log
+================================================================
+Last updated: 2026-05-28
+Pod: ala023-540533 (NVIDIA A30, 24GB)
+Repo: ~/151B_SP26_Competition on DSMLP
+
+This file tracks environment fixes, inference runs, timings, and lessons learned.
+Update it after each experiment.
+
+
+================================================================
+1. PROJECT CONSTRAINTS
+================================================================
+
+- Model (required): Qwen/Qwen3-4B-Thinking-2507 only
+- Inference: DSMLP GPU pod only (not laptop, not dsmlp-login)
+- Submission: submission.csv with columns id,response (943 rows from data/private.jsonl)
+- Responses must include full model trace; final answer in \boxed{...}
+- Local judger: judger.py (MCQ letter from boxed; free-form symbolic/numeric)
+
+
+================================================================
+2. PIPELINE (src/qwen3_comp/)
+================================================================
+
+Default production settings (build_submission.py / run_validation.py):
+
+  Prompts:
+    primary: strict
+    retry:   commit_now (only if no extractable boxed answer)
+
+  Self-consistency:
+    n_mcq = 5 samples per MCQ question
+    n_free = 3 samples per free-form question
+    majority vote on normalized boxed answers
+
+  Retry:
+    max_retries = 1
+    retry uses larger max_new_tokens (budget.py: 6144–8192)
+    retry n = max(1, n_mcq or n_free // 2)
+
+  Sampling:
+    temperature=0.7, top_p=0.95, top_k=20, seed=0
+
+  vLLM engine (vllm_runtime.py):
+    quantization=bitsandbytes, dtype=bfloat16
+    max_model_len=16384, gpu_memory_utilization=0.85
+    backend=vllm (fallback: transformers + 4-bit)
+
+  Token budgets (route_max_new_tokens, retry=0):
+    MCQ short/medium/long: 2048 / 3072 / 4096
+    Free-form: 2048–4096 by difficulty and [ANS] count
+    Retry: 6144 or 8192
+
+  Batching:
+    One vLLM generate() for ALL pending questions (primary pass)
+    Second generate() for retry failures only
+    responses.jsonl written AFTER both passes complete (not per-question streaming)
+
+
+================================================================
+3. DSMLP ENVIRONMENT — ISSUES & FIXES
+================================================================
+
+Issue A: numpy 2.x vs conda scipy/sklearn (BROKEN)
+  Symptoms:
+    AttributeError: _ARRAY_API not found
+    numpy.core.multiarray failed to import
+    transformers 5.x pulled via ~/.local
+  Cause:
+    Old install_env.sh installed to ~/.local with numpy 2.2.6, transformers 5.9.0
+    No project .venv
+  Fix:
+    bash dsmlp/bootstrap_venv.sh   (or install_env.sh after git pull)
+    Always: source .venv/bin/activate before python
+    Pin: numpy>=1.26.4,<2, transformers>=4.51,<5, scipy/sklearn in venv
+  Verify:
+    python -c "import numpy, transformers, torch; print(numpy.__version__, transformers.__version__)"
+    Expect: 1.26.x  4.xx  2.6.x+cu124
+
+Issue B: Disk quota exceeded during install
+  Cause:
+    bootstrap installed accelerate BEFORE vllm → torch 2.12 + CUDA 13 (~3GB)
+    then vllm pulled torch 2.6 + CUDA 12 again
+    ~/.local had ~5.8GB junk from prior --user installs
+  Fix:
+    rm -rf ~/.local/lib/python3.11/site-packages/{torch,nvidia,vllm,transformers}*
+    python3 -m pip cache purge
+    rm -rf .venv
+    bootstrap_venv.sh now: numpy/scipy first, then single pip install -r requirements-dsmlp.txt
+    export PIP_NO_CACHE_DIR=1 during install
+
+Issue C: vLLM "Cannot re-initialize CUDA in forked subprocess"
+  Cause:
+    torch.cuda.is_available() in parent before vLLM forks engine
+  Fix (code):
+    multiprocessing.set_start_method("spawn") in smoke/build_submission/run_validation
+    _require_cuda() uses torch.cuda.device_count() not is_available()
+  Fix (runtime, no git pull):
+    export VLLM_WORKER_MULTIPROC_METHOD=spawn
+
+Issue D: Blackwell / MIG pods
+  vLLM + PyTorch 2.6 may fail on sm_120 / MIG slices
+  Fix: launch-scipy-ml.sh -g 1 -c 8 -m 32 -v a30
+
+Issue E: git pull "Disk quota exceeded"
+  Free space first (free_disk.sh), then pull
+
+Issue F: tmux "duplicate session: submit"
+  Session already exists; use tmux attach -t submit
+  Job may run inside existing session even if current shell has empty $TMUX
+
+
+================================================================
+4. LAUNCH & POD LIFETIME
+================================================================
+
+Login:
+  ssh USERNAME@dsmlp-login.ucsd.edu
+
+GPU pod (used):
+  launch-scipy-ml.sh -g 1 -c 8 -m 32 -v a30
+  Default pod timeout: 6 hours (no K8S_TIMEOUT_SECONDS set)
+
+Recommended for finish pod:
+  K8S_TIMEOUT_SECONDS=43200 launch-scipy-ml.sh -g 1 -c 8 -m 32 -v a30
+  (12 hours; launch_gpu.sh sets this via TIMEOUT_SECONDS)
+
+A30 vs A5000:
+  Both 24GB Ampere — fine for this 4B quantized job
+  Avoid Blackwell MIG; A30 already validated
+
+tmux:
+  tmux new -s submit
+  Detach: Ctrl+b then :detach  (or Ctrl+b d; Jupyter may swallow Ctrl+b)
+  Reattach: tmux attach -t submit
+  Mac sleep: OK if job runs inside tmux on pod (SSH drop does not kill tmux server)
+
+
+================================================================
+5. EXPERIMENT RUNS
+================================================================
+
+Run 0 — Environment verify (after bootstrap)
+  Date: 2026-05-28
+  Command: bootstrap verify block in bootstrap_venv.sh
+  Result: numpy 1.26.4, transformers 4.57.6, torch 2.6.0+cu124, CUDA A30 OK
+
+Run 1 — smoke_test_vllm.py
+  Date: 2026-05-28
+  Command:
+    source .venv/bin/activate
+    export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    python scripts/smoke_test_vllm.py --n 3
+  Settings: n_mcq=2, n_free=2, max_retries=1 (script defaults)
+  Engine init: ~126s first time (compile cold)
+  Generation: ~347s for 3 questions
+  Result:
+    boxed 2/3, correct 0/3 on tiny sample
+    vLLM stack confirmed working after spawn fix
+
+Run 2 — mini validation (production-width settings)
+  Date: 2026-05-28
+  Commands:
+    python scripts/build_validation_split.py \
+      --out results/validation/mini.jsonl \
+      --n_mcq 5 --n_free_single 8 --n_free_multi 2
+    python scripts/run_validation.py \
+      --split results/validation/mini.jsonl --run_id mini_a30
+  Settings: n_mcq=5, n_free=3, max_retries=1, strict/commit_now
+  Split: 15 questions (5 MCQ, 8 free_single, 2 free_multi)
+  Engine init: ~58s (compile cache hit)
+  Generation: 466.0s
+    Primary: 55 completions in 2:33 (~2.8 s/completion)
+    Retry:   5 completions in 3:44 (~45 s/completion)
+  Metrics (summary.json):
+    accuracy all: 66.7% (10/15)
+    mcq: 60%, free_single: 62.5%, free_multi: 100%
+    boxed_rate: 86.7%
+    trunc_rate: 13.3%
+    avg_chars: ~5106
+    failures: 2 no_boxed, 2 sanity_failed, 2 votes_with_no_winner
+  Artifacts:
+    results/validation/mini_a30/responses.jsonl
+    results/validation/mini_a30/summary.json
+    results/validation/mini_a30/config.json
+
+Run 3 — FULL private submission (IN PROGRESS at log time)
+  Date: 2026-05-28, started ~11:10–11:12
+  tmux session: submit (attached in another terminal)
+  Command:
+    tmux new -s submit
+    cd ~/151B_SP26_Competition
+    source .venv/bin/activate
+    export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    python scripts/build_submission.py \
+      --test data/private.jsonl \
+      --out submission.csv \
+      --responses_jsonl results/submission/responses.jsonl
+  Start state: Submission: 0 done, 943 pending
+  Engine init: ~57s (cached compile)
+  Primary progress snapshot (~11:27):
+    457/3429 completions, 17:00 elapsed
+    ETA bar: ~1:31 remaining on primary
+    ~129 input tok/s, ~957 output tok/s, ~1.84 s/it
+  Note: responses.jsonl stays 0 until primary+retry finish, then bulk write
+  Revised ETA (from bar): ~2–2.5 h total (not initial 6–8 h estimate)
+  Pod: 6h from ~10:16 launch → may finish before pod death
+
+
+================================================================
+6. TIMING LESSONS (why full run >> initial estimate)
+================================================================
+
+Initial estimate (~6–8 h):
+  - Linear scale from mini (466s × 943/15)
+  - Assumed low effective tok/s, small-batch overhead per question
+
+Actual full-run behavior:
+  - Single batched vLLM call for 943 prompts → ~900–950 aggregate output tok/s
+  - Progress bar counts completions (3429 primary = samples not questions)
+  - Engine init amortized once
+  - Effective ~1.5–2 h primary + ~0.5–1 h retry
+
+Rule of thumb after this project:
+  - Small-n validation time does NOT linearly predict full-batch time
+  - Trust vLLM progress bar ETA on 3429 completion scale for primary pass
+
+
+================================================================
+7. COMMAND CHEAT SHEET
+================================================================
+
+# Install (once per pod if .venv missing)
+cd ~/151B_SP26_Competition
+bash dsmlp/bootstrap_venv.sh
+source .venv/bin/activate
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+
+# Smoke
+python scripts/smoke_test_vllm.py --n 3
+
+# Mini validation
+python scripts/build_validation_split.py --out results/validation/mini.jsonl \
+  --n_mcq 5 --n_free_single 8 --n_free_multi 2
+python scripts/run_validation.py --split results/validation/mini.jsonl --run_id mini_a30
+
+# Full submission
+tmux new -s submit
+python scripts/build_submission.py --test data/private.jsonl --out submission.csv \
+  --responses_jsonl results/submission/responses.jsonl
+
+# Monitor (jsonl may not grow until end)
+tmux ls
+tmux attach -t submit
+ps aux | grep build_submission
+wc -l results/submission/responses.jsonl
+
+# Resume after pod death
+K8S_TIMEOUT_SECONDS=43200 launch-scipy-ml.sh -g 1 -c 8 -m 32 -v a30
+source .venv/bin/activate
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+# same build_submission.py command — skips ids already in responses.jsonl
+
+# Copy submission to laptop
+scp USER@dsmlp-login.ucsd.edu:~/151B_SP26_Competition/submission.csv .
+
+
+================================================================
+8. RESUME AFTER POD DEATH
+================================================================
+
+Checkpoint file: results/submission/responses.jsonl
+  - One JSON line per completed question id
+  - Re-run same build_submission.py → prints "N done, M pending"
+
+Not lost on pod death:
+  - ~/.cache/huggingface (model weights)
+  - ~/151B_SP26_Competition/.venv (usually persists on home dir)
+  - responses.jsonl partial progress
+
+Lost on pod death:
+  - In-flight batch (not yet written to jsonl)
+  - tmux session (start new attach after relaunch)
+
+
+================================================================
+9. QUALITY / PROMPT NOTES (from milestone + mini)
+================================================================
+
+- Main failure mode at low budget: truncation before \boxed{}
+- strict prompt default helps boxed extraction vs baseline
+- commit_now retry for missing boxed answers
+- MCQ: vote on letter inside \boxed{}
+- Free-form: comma-separated subanswers in one \boxed{} matching [ANS] order
+- Mini 86.7% boxed < 95% script warning threshold — expect some empty/bad rows
+- Numerical near-misses may score wrong (e.g. 442.86 vs 442.857...) — judger strictness
+
+
+================================================================
+10. FILES & ARTIFACTS
+================================================================
+
+  dsmlp/bootstrap_venv.sh     — one-shot venv install (disk-safe order)
+  dsmlp/install_env.sh        — same, uses requirements-dsmlp.txt
+  dsmlp/free_disk.sh          — purge pip cache, remove .venv
+  requirements-dsmlp.txt      — pinned deps (numpy<2, vllm==0.8.5.post1, transformers<5)
+  results/validation/mini.jsonl
+  results/validation/mini_a30/
+  results/submission/responses.jsonl  — checkpoint (submission run)
+  submission.csv                      — final Kaggle file
+  submission.csv.verification.json    — row/boxed checks
+
+
+================================================================
+11. TODO / UPDATE WHEN DONE
+================================================================
+
+[ ] Full submission completes (943 lines in responses.jsonl)
+[ ] submission.csv verification passes (boxed_rate, row count)
+[ ] Upload to Kaggle
+[ ] Record final wall time and primary/retry split from logs
+[ ] Optional: full validation split run_validation.py on 150 public items
+[ ] Optional: tune n_mcq/n_free/temperature if leaderboard weak
+
+---
+Append new runs below with date, settings, metrics, and path to artifacts.
+
