@@ -39,10 +39,43 @@ class VotingResult:
 
 
 _WS = re.compile(r"\s+")
+_PURE_DECIMAL = re.compile(r"^-?\d+(\.\d+)?$")
+
+
+def _float_canonical(s: str) -> Optional[str]:
+    """Return a canonical decimal string for *s* if it parses as a pure float.
+
+    Rounds to 6 significant figures so answers like ``442.857`` and
+    ``442.857142857`` fall into the same vote bucket instead of splitting.
+    Returns ``None`` when *s* is not a plain decimal (e.g. fractions or
+    symbolic answers are left unchanged).
+    """
+    if not _PURE_DECIMAL.match(s):
+        return None
+    try:
+        f = float(s)
+    except ValueError:
+        return None
+    if f == 0.0:
+        return "0"
+    formatted = f"{f:.6g}"
+    if "." in formatted:
+        formatted = formatted.rstrip("0").rstrip(".")
+    return formatted
 
 
 def normalize_answer(raw: str) -> str:
-    """Lightweight normaliser to bucket equivalent answer strings."""
+    """Normalise an answer string for majority-vote bucketing.
+
+    Steps applied in order:
+    1. Strip outer whitespace and LaTeX ``$`` delimiters.
+    2. Collapse all internal whitespace.
+    3. Unify fraction command variants.
+    4. Strip ``\\left`` / ``\\right`` size hints.
+    5. If the result looks like a plain decimal, round to 6 significant
+       figures so near-equal values (e.g. ``442.857`` vs ``442.857142857``)
+       map to the same bucket.
+    """
     if raw is None:
         return ""
     out = raw.strip()
@@ -50,6 +83,9 @@ def normalize_answer(raw: str) -> str:
     out = _WS.sub("", out)
     out = out.replace("\\dfrac", "\\frac").replace("\\tfrac", "\\frac")
     out = out.replace("\\left", "").replace("\\right", "")
+    canonical = _float_canonical(out)
+    if canonical is not None:
+        return canonical
     return out
 
 
@@ -143,10 +179,15 @@ def _repair_sampling(sampling: SamplingConfig) -> SamplingConfig:
 
 
 def _repair_max_new_tokens(item: dict) -> int:
-    """Small budget to extract/format an answer from a draft."""
+    """Budget for the format-repair pass.
+
+    Larger than the original values because the repair prompt sometimes
+    needs a short reasoning trace to extract the correct sub-answer from
+    a long, partially-truncated draft.
+    """
     if item.get("options"):
-        return 256
-    return 768 if expected_num_answers(item) > 1 else 512
+        return 512
+    return 1024 if expected_num_answers(item) > 1 else 1024
 
 
 def _repair_n_samples(item: dict) -> int:
