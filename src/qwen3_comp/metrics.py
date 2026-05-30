@@ -8,7 +8,7 @@ mode visible at a glance.
 
 from __future__ import annotations
 
-from .extract import extract_boxed_content
+from .extract import extract_boxed_content, split_box_subanswers
 from .prompts import expected_num_answers
 
 
@@ -57,7 +57,7 @@ def response_metrics(items: list[dict], responses: list[str]) -> dict:
         if not it.get("options") and inner is not None:
             expected = expected_num_answers(it)
             if expected > 1:
-                parts = [p for p in inner.split(",") if p.strip()]
+                parts = split_box_subanswers(inner)
                 if len(parts) != expected:
                     mismatched += 1
 

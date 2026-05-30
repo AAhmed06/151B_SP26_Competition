@@ -1,6 +1,6 @@
 CSE 151B SP26 Math Reasoning Competition — Experiment & Run Log
 ================================================================
-Last updated: 2026-05-29
+Last updated: 2026-05-29 (pipeline v2: sanity-triggered retry/repair)
 Pod: ala023-3776691 (DSMLP GPU; A30/A5000 class, 24GB)
 Repo: ~/151B_SP26_Competition on DSMLP
 
@@ -28,18 +28,35 @@ Single entry point: run_inference.py → scripts/build_submission.py:run_inferen
 Default production settings (run_inference.py / run_validation.py):
 
   Prompts:
-    primary: strict
-    retry:   commit_now (only if no extractable boxed answer)
+    primary: strict (default) or commit_now (rerun subset)
+    retry:   commit_now
+    repair:  repair_box (format-only extraction from draft)
 
   Self-consistency:
-    n_mcq = 5 samples per MCQ question
+    n_mcq = 5 samples per MCQ question (recommend 7 for reruns)
     n_free = 3 samples per free-form question
     majority vote on normalized boxed answers
+
+  Recovery (2026-05-29 v2 — sanity-triggered, not vote-key-only):
+    Trigger retry/repair when post_hoc_sanity() fails, not only when
+    vote_answer is None. Catches empty_boxed_answer, wrong_subanswer_count,
+    boxed_not_letter, and no_boxed_answer alike.
+    Flow: primary -> retry (if still insane) -> repair_box -> fallback
 
   Retry:
     max_retries = 1
     retry uses larger max_new_tokens (budget.py: 6144–8192)
     retry n = max(1, n_mcq or n_free // 2)
+
+  Repair (repair_box prompt, low temperature):
+    MCQ: n=3 repair samples, max_new_tokens=256
+    Free-form single: n=2, max_new_tokens=512
+    Free-form multi-[ANS]: n=2, max_new_tokens=768
+    Draft for repair = latest sample (includes retry output if retry ran)
+
+  Checkpoint metadata (per JSONL row):
+    retry_attempted, repair_attempted, repair_succeeded, final_stage
+    (primary | retry | repair)
 
   Sampling:
     temperature=0.7, top_p=0.95, top_k=20, seed=0
@@ -58,7 +75,7 @@ Default production settings (run_inference.py / run_validation.py):
 
   Batching (2026-05-29 update):
     --batch_size N (default 16): pending rows processed in chunks of N
-    Per batch: primary vLLM generate() → retry generate() for failures in batch
+    Per batch: primary → retry (sanity failures) → repair_box → CSV rewrite
     Checkpoint: append to responses_jsonl + rewrite submission.csv after EACH batch
     Resume: skip any id already present in responses_jsonl (last line wins on dupes)
     Tradeoff: batch_size 16 ~13 min/batch but ~12h full run; 64 ~30–40% faster;
@@ -260,7 +277,7 @@ Run 6 — rerun no-box rows (attempted 2026-05-29)
       --enforce_eager --max_num_seqs 96
   Start state: Submission: 644 done, 299 pending — CORRECT
   Failed: conda Python without .venv (Issue G) before batch 1 finished
-  Status: INCOMPLETE — re-run same command after source .venv/bin/activate
+  Status: COMPLETED on resume — see "Run 6 completion" entry below (+41 boxed, Kaggle 0.611)
 
 
 ================================================================
@@ -324,20 +341,39 @@ python run_inference.py \
   --responses_jsonl results/submission/responses.jsonl.backup \
   --skip_inference
 
-# Rerun rows missing boxed answers (build filtered checkpoint first)
+# Build sane_boxed rerun checkpoint (recommended over boxed-only filter)
+python run_inference.py \
+  --rerun_checkpoint_in results/submission/responses.jsonl.backup \
+  --rerun_checkpoint_out results/submission/responses_rerun_sane.jsonl \
+  --rerun_filter_mode sane_boxed \
+  --prepare_rerun_only
+
+# Rerun pending rows with sanity-aware resume + stronger repair (pipeline v2)
+python run_inference.py \
+  --test data/private.jsonl \
+  --out submission.csv \
+  --responses_jsonl results/submission/responses_rerun_sane.jsonl \
+  --batch_size 64 \
+  --primary_prompt commit_now \
+  --retry_prompt commit_now \
+  --n_mcq 7 \
+  --n_free 3 \
+  --enforce_eager \
+  --max_num_seqs 96 \
+  --resume_require_sane_boxed
+
+# Quick checkpoint audit (unboxed / sanity breakdown)
 python - <<'PY'
 import json
+from collections import Counter
 from pathlib import Path
-src = Path("results/submission/responses.jsonl.backup")
-dst = Path("results/submission/responses_rerun.jsonl")
-kept = [json.loads(l) for l in src.read_text().splitlines() if l.strip() and json.loads(l).get("boxed")]
-dst.write_text("".join(json.dumps(r)+"\n" for r in kept))
-print(len(kept), "kept,", 943-len(kept), "to rerun")
+p = Path("results/submission/responses_rerun_sane.jsonl")
+recs = {json.loads(l)["id"]: json.loads(l) for l in p.read_text().splitlines() if l.strip()}
+bad = [r for r in recs.values() if not r.get("boxed")]
+print("total", len(recs), "unboxed", len(bad))
+print("mcq/free", Counter("mcq" if r.get("is_mcq") else "free" for r in bad))
+print("sanity", Counter(r.get("sanity_reason") for r in bad))
 PY
-python run_inference.py \
-  --responses_jsonl results/submission/responses_rerun.jsonl \
-  --primary_prompt commit_now --retry_prompt commit_now \
-  --batch_size 64 --enforce_eager --max_num_seqs 96
 
 # Monitor (jsonl grows after each batch now)
 tmux ls
@@ -385,22 +421,30 @@ Pitfall: filtering checkpoint to "boxed only" then wondering why CSV has empty r
 
 - Main failure mode at low budget: truncation before \boxed{}
 - strict prompt default helps boxed extraction vs baseline
-- commit_now retry for missing boxed answers
+- commit_now retry for sanity failures (no box, empty box, wrong subanswer count)
+- repair_box pass for stubborn rows after retry (n=2–3, low temperature)
 - MCQ: vote on letter inside \boxed{}
 - Free-form: comma-separated subanswers in one \boxed{} matching [ANS] order
 - Mini 86.7% boxed < 95% script warning threshold — expect some empty/bad rows
-- Full private run: 661/943 boxed (70.1%); 635/943 sane+voteable (~67% judger-ready)
+- Full private run after Run 6: 702/943 boxed (74.4%); latest rerun_sane audit: 728/943
+  boxed (~77%), 215 unboxed; 635/943 sane+voteable from dry-run filter
 - 282 no_boxed_answer: truncation mid-reasoning, rarely complete \boxed{}
 - 17 empty_boxed_answer: \boxed literal in text but truncated before closing brace
 - 9 wrong_subanswer_count: comma grouping wrong for multi-[ANS] (e.g. 41,35,16 x4 ids)
 - Filter for rerun: use rec.get("boxed") truthy, NOT "is not None" (keeps empty strings)
 - Numerical near-misses may score wrong (e.g. 442.86 vs 442.857...) — judger strictness
 
+Done in pipeline v2 (2026-05-29):
+  - Sanity-triggered retry/repair (not vote-key-only)
+  - Multi-sample repair (MCQ n=3, free n=2) with larger multi-[ANS] budget
+  - Per-row stage metadata + sane_rate in submission.verification.json
+  - metrics.py uses bracket-aware split_box_subanswers for diagnostics
+
 Future improvements (next iteration):
-  - Add a second repair stage for stubborn no-box rows (n=2 repair samples)
   - Failure-specific retries (no_box vs wrong_subanswer_count) with custom budgets
   - Two-stage: solve then deterministic format-only extractor prompt
-  - Optional: stricter free-form answer-count correction for multi-[ANS]
+  - Optional: strip Qwen thinking tags before extract (align with judger)
+  - QLoRA format SFT only if inference recovery plateaus (see scripts/train_qlora.py)
 
 
 ================================================================
@@ -417,7 +461,8 @@ Future improvements (next iteration):
   scripts/build_submission.py         — run_inference(), --batch_size, --model_id, OOM flags
   results/submission/responses.jsonl.backup — FULL 943-row checkpoint (canonical)
   results/submission/responses.jsonl  — partial or latest checkpoint
-  results/submission/responses_rerun.jsonl — 644 good rows; base for 299-row rerun
+  results/submission/responses_rerun.jsonl — Run 6 base (644 boxed-only kept)
+  results/submission/responses_rerun_sane.jsonl — sane_boxed filter; base for Run 7
   responses.jsonl (repo root)         — filtered 661-row subset (local only; not on pod)
   submission.csv                      — final Kaggle file (943 rows, ~6.3 MB multiline)
   submission.verification.json        — row/boxed checks
@@ -429,12 +474,14 @@ Future improvements (next iteration):
 
 [x] Full submission completes (943 lines in responses.jsonl.backup)
 [x] submission.csv structurally valid (943 rows, 0 empty, header id,response)
-[ ] boxed_rate >= 95% (currently 74.44%; 241 rows still unboxed)
-[x] Upload to Kaggle (best score so far: 0.611)
+[ ] boxed_rate >= 95% (currently ~77% after Run 6; 215 unboxed in rerun_sane audit)
+[x] Upload to Kaggle (best score so far: 0.621; prior 0.611 after Run 6)
 [x] Run 6 rerun complete (299 no-box rows with commit_now on .venv python)
 [x] Record final wall time for Run 6 after resume
-[ ] Optional: full validation split run_validation.py on 150 public items
-[ ] Optional: implement repair pass / sane-only done criteria in pipeline
+[x] Implement repair pass + sane-only resume criteria in pipeline (v2, 2026-05-29)
+[ ] Run 7: rerun ~215–308 insane/unboxed rows with pipeline v2 + --resume_require_sane_boxed
+[ ] Optional: mini/150 validation sweep before full private rerun (commit_now, n_mcq=7)
+[ ] Optional: QLoRA only if boxed_rate plateaus above 90% but accuracy stalls
 
 ---
 Append new runs below with date, settings, metrics, and path to artifacts.
@@ -490,4 +537,33 @@ Validation plan before next long private rerun:
   1) Build sane_boxed checkpoint from latest rerun file
   2) Run 20-row smoke on public split (commit_now + repair enabled)
   3) If boxed_rate increases vs current baseline, run full pending private rows
+
+2026-05-29 — Pipeline v2 (sanity-triggered retry/repair + diagnostics)
+  Code changes (local; deploy via git pull on pod):
+    src/qwen3_comp/self_consistency.py
+      - Retry/repair trigger: post_hoc_sanity() failure (not vote_answer is None)
+      - Repair: MCQ n=3, free n=2; multi-[ANS] repair budget 768 tokens
+      - Repair draft = latest sample (retry output if retry ran)
+      - VotingResult fields: retry_attempted, repair_attempted,
+        repair_succeeded, final_stage
+    scripts/build_submission.py
+      - Checkpoint rows include stage metadata
+      - submission.verification.json adds sane_rate, sanity_failures breakdown
+    scripts/run_validation.py
+      - Summary adds retry/repair counts and final_stage histogram
+    src/qwen3_comp/metrics.py
+      - Multi-[ANS] mismatch uses split_box_subanswers (bracket-aware)
+  Local smoke test (no GPU): fake engine confirms unboxed MCQ -> repair -> \boxed{C}
+  Analysis at 0.621 unified accuracy (943 rows):
+    - 215 unboxed (108 MCQ, 107 free); 214 no_boxed_answer, 1 empty_boxed_answer
+    - Conditional accuracy on boxed rows ~586/728 ≈ 80.5%
+    - Main lever: complete rows via rerun, not model swap
+  Recommended next run (Run 7):
+    python run_inference.py \
+      --responses_jsonl results/submission/responses_rerun_sane.jsonl \
+      --out submission.csv \
+      --batch_size 64 --primary_prompt commit_now --retry_prompt commit_now \
+      --n_mcq 7 --n_free 3 --enforce_eager --max_num_seqs 96 \
+      --resume_require_sane_boxed
+  Status: CODE READY — awaiting GPU validation + private rerun
 

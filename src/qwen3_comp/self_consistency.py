@@ -32,6 +32,10 @@ class VotingResult:
     n_samples: int
     extraction_rate: float
     samples: list[str]
+    retry_attempted: bool = False
+    repair_attempted: bool = False
+    repair_succeeded: bool = False
+    final_stage: str = "primary"
 
 
 _WS = re.compile(r"\s+")
@@ -140,7 +144,20 @@ def _repair_sampling(sampling: SamplingConfig) -> SamplingConfig:
 
 def _repair_max_new_tokens(item: dict) -> int:
     """Small budget to extract/format an answer from a draft."""
-    return 256 if item.get("options") else 512
+    if item.get("options"):
+        return 256
+    return 768 if expected_num_answers(item) > 1 else 512
+
+
+def _repair_n_samples(item: dict) -> int:
+    """Use a little self-consistency for cheap formatter-only repairs."""
+    return 3 if item.get("options") else 2
+
+
+def _needs_recovery(item: dict, vote: VotingResult) -> bool:
+    """Return True when the current response is unlikely to score."""
+    sane, _ = post_hoc_sanity(item, vote.response)
+    return not sane
 
 
 def generate_with_retry_and_vote(
@@ -161,8 +178,9 @@ def generate_with_retry_and_vote(
     1. Generate ``n_mcq`` or ``n_free`` samples from the strict prompt
        at the type-routed token budget.
     2. Majority-vote on the boxed answers.
-    3. If no sample produced an extractable boxed answer, retry once
-       with the commit-now prompt at a larger token budget.
+    3. If the voted response fails post-hoc sanity, retry once with the
+       commit-now prompt at a larger token budget.
+    4. If the row still fails sanity, run a cheap formatter-only repair pass.
     """
     sampling = sampling or SamplingConfig()
 
@@ -185,7 +203,7 @@ def generate_with_retry_and_vote(
     for idx, (item, samples) in enumerate(zip(items, primary_outputs)):
         vote = majority_vote(item, samples)
         results.append(vote)
-        if vote.vote_answer is None and max_retries > 0:
+        if _needs_recovery(item, vote) and max_retries > 0:
             retry_indices.append(idx)
             retry_requests.append(
                 _make_request(
@@ -204,18 +222,23 @@ def generate_with_retry_and_vote(
             # Combine the new samples with the originals for voting
             combined = results[idx].samples + samples
             new_vote = majority_vote(item, combined)
-            if new_vote.vote_answer is not None or not results[idx].samples:
+            new_vote.retry_attempted = True
+            new_vote.final_stage = "retry"
+            if not _needs_recovery(item, new_vote) or not results[idx].samples:
                 results[idx] = new_vote
+            else:
+                results[idx].retry_attempted = True
+                results[idx].samples = combined
 
-    # Cheap repair pass: if we still have no valid vote key, ask the model to
-    # emit only one final boxed answer from the existing draft response.
+    # Cheap repair pass: if we still do not have a sane final response, ask the
+    # model to emit only one final boxed answer from the existing draft response.
     repair_indices: list[int] = []
     repair_requests: list[GenerationRequest] = []
     repair_sampling = _repair_sampling(sampling)
     for idx, (item, vote) in enumerate(zip(items, results)):
-        if vote.vote_answer is not None:
+        if not _needs_recovery(item, vote):
             continue
-        draft = vote.response or (vote.samples[0] if vote.samples else "")
+        draft = vote.samples[-1] if vote.samples else vote.response
         if not draft:
             continue
         repair_item = dict(item)
@@ -226,7 +249,7 @@ def generate_with_retry_and_vote(
                 repair_item,
                 prompt_id="repair_box",
                 max_new_tokens=_repair_max_new_tokens(item),
-                n=1,
+                n=_repair_n_samples(item),
                 sampling=repair_sampling,
             )
         )
@@ -237,8 +260,14 @@ def generate_with_retry_and_vote(
             item = items[idx]
             combined = results[idx].samples + samples
             new_vote = majority_vote(item, combined)
-            if new_vote.vote_answer is not None:
+            new_vote.retry_attempted = results[idx].retry_attempted
+            new_vote.repair_attempted = True
+            new_vote.final_stage = "repair"
+            if not _needs_recovery(item, new_vote):
+                new_vote.repair_succeeded = True
                 results[idx] = new_vote
+            else:
+                results[idx].repair_attempted = True
 
     # Final safety: each result must have a non-empty response field
     # so the submission CSV row is never empty.
@@ -253,6 +282,10 @@ def generate_with_retry_and_vote(
                 n_samples=res.n_samples,
                 extraction_rate=res.extraction_rate,
                 samples=res.samples,
+                retry_attempted=res.retry_attempted,
+                repair_attempted=res.repair_attempted,
+                repair_succeeded=res.repair_succeeded,
+                final_stage=res.final_stage,
             )
 
     return results

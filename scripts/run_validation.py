@@ -25,6 +25,7 @@ import json
 import multiprocessing
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 if multiprocessing.get_start_method(allow_none=True) != "spawn":
@@ -167,6 +168,10 @@ def main() -> int:
                     "vote_count": vote.vote_count,
                     "n_samples": vote.n_samples,
                     "extraction_rate": vote.extraction_rate,
+                    "retry_attempted": vote.retry_attempted,
+                    "repair_attempted": vote.repair_attempted,
+                    "repair_succeeded": vote.repair_succeeded,
+                    "final_stage": vote.final_stage,
                     "sane": sane,
                     "sanity_reason": reason,
                     "correct": ok,
@@ -185,6 +190,10 @@ def main() -> int:
         "sanity_failed": sum(1 for r in ordered if not r["sane"]),
         "no_boxed": sum(1 for r in ordered if r["boxed"] is None),
         "votes_with_no_winner": sum(1 for r in ordered if r["vote_answer"] is None),
+        "retry_attempted": sum(1 for r in ordered if r.get("retry_attempted")),
+        "repair_attempted": sum(1 for r in ordered if r.get("repair_attempted")),
+        "repair_succeeded": sum(1 for r in ordered if r.get("repair_succeeded")),
+        "final_stage": dict(Counter(r.get("final_stage", "unknown") for r in ordered)),
     }
 
     summary = {

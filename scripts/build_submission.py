@@ -39,6 +39,7 @@ import multiprocessing
 import os
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 if multiprocessing.get_start_method(allow_none=True) != "spawn":
@@ -230,6 +231,10 @@ def _make_response_record(item: dict, vote) -> dict:
         "vote_count": vote.vote_count,
         "n_samples": vote.n_samples,
         "extraction_rate": vote.extraction_rate,
+        "retry_attempted": vote.retry_attempted,
+        "repair_attempted": vote.repair_attempted,
+        "repair_succeeded": vote.repair_succeeded,
+        "final_stage": vote.final_stage,
         "sane": sane,
         "sanity_reason": reason,
     }
@@ -322,6 +327,14 @@ def _verify_csv(out_path: Path, items: list[dict], expected_rows: int) -> dict:
             lambda s: extract_boxed_content(s) is not None
         ).sum()
     )
+    sanity_reasons: Counter[str] = Counter()
+    n_sane = 0
+    for item, response in zip(items, df["response"].astype(str)):
+        sane, reason = post_hoc_sanity(item, response)
+        if sane:
+            n_sane += 1
+        else:
+            sanity_reasons[reason] += 1
 
     return {
         "rows": int(len(df)),
@@ -329,6 +342,9 @@ def _verify_csv(out_path: Path, items: list[dict], expected_rows: int) -> dict:
         "empty_responses": n_empty,
         "boxed_responses": n_boxed,
         "boxed_rate": n_boxed / max(1, len(df)),
+        "sane_responses": n_sane,
+        "sane_rate": n_sane / max(1, len(df)),
+        "sanity_failures": dict(sanity_reasons),
         "issues": issues,
     }
 
