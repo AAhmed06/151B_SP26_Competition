@@ -96,33 +96,49 @@ def _load_done(path: Path) -> dict[int, dict]:
     return done
 
 
-def main() -> int:
-    args = parse_args()
-    out_dir = REPO_ROOT / "results" / "validation" / args.run_id
+def run_validation(
+    *,
+    split: str | Path = "results/validation/split.jsonl",
+    run_id: str = "run01",
+    backend: str = "vllm",
+    n_mcq: int = 5,
+    n_free: int = 3,
+    max_retries: int = 1,
+    temperature: float = 0.7,
+    top_p: float = 0.95,
+    top_k: int = 20,
+    seed: int = 0,
+    primary_prompt: str = "strict",
+    retry_prompt: str = "commit_now",
+    limit: int = 0,
+) -> dict:
+    """Run validation and return the summary dict (notebook-friendly API)."""
+    split = Path(split)
+    out_dir = REPO_ROOT / "results" / "validation" / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
     responses_path = out_dir / "responses.jsonl"
     summary_path = out_dir / "summary.json"
     config_path = out_dir / "config.json"
 
-    items = load_jsonl(args.split)
-    if args.limit > 0:
-        items = items[: args.limit]
-    print(f"Validation set: {len(items)} questions (run_id={args.run_id})")
+    items = load_jsonl(split)
+    if limit > 0:
+        items = items[:limit]
+    print(f"Validation set: {len(items)} questions (run_id={run_id})")
 
     config = {
-        "split": args.split,
-        "run_id": args.run_id,
-        "backend": args.backend,
-        "n_mcq": args.n_mcq,
-        "n_free": args.n_free,
-        "max_retries": args.max_retries,
-        "temperature": args.temperature,
-        "top_p": args.top_p,
-        "top_k": args.top_k,
-        "seed": args.seed,
-        "primary_prompt": args.primary_prompt,
-        "retry_prompt": args.retry_prompt,
-        "limit": args.limit,
+        "split": str(split),
+        "run_id": run_id,
+        "backend": backend,
+        "n_mcq": n_mcq,
+        "n_free": n_free,
+        "max_retries": max_retries,
+        "temperature": temperature,
+        "top_p": top_p,
+        "top_k": top_k,
+        "seed": seed,
+        "primary_prompt": primary_prompt,
+        "retry_prompt": retry_prompt,
+        "limit": limit,
     }
     config_path.write_text(json.dumps(config, indent=2))
 
@@ -131,24 +147,24 @@ def main() -> int:
     print(f"Resuming: {len(done)} done, {len(pending)} pending")
 
     if pending:
-        engine = VLLMEngine(backend=args.backend, seed=args.seed)
+        engine = VLLMEngine(backend=backend, seed=seed)
         sampling = SamplingConfig(
-            temperature=args.temperature,
-            top_p=args.top_p,
-            top_k=args.top_k,
-            seed=args.seed or None,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            seed=seed or None,
         )
 
         t0 = time.time()
         votes = generate_with_retry_and_vote(
             engine,
             pending,
-            primary_prompt_id=args.primary_prompt,
-            retry_prompt_id=args.retry_prompt,
-            n_mcq=args.n_mcq,
-            n_free=args.n_free,
+            primary_prompt_id=primary_prompt,
+            retry_prompt_id=retry_prompt,
+            n_mcq=n_mcq,
+            n_free=n_free,
             sampling=sampling,
-            max_retries=args.max_retries,
+            max_retries=max_retries,
         )
         elapsed = time.time() - t0
         print(f"Generated {len(votes)} new questions in {elapsed:.1f}s.")
@@ -179,7 +195,6 @@ def main() -> int:
                 f.write(json.dumps(rec) + "\n")
                 done[rec["id"]] = rec
 
-    # Aggregate metrics over the full split (including any pre-existing rows)
     ordered = [done[it["id"]] for it in items if it.get("id") in done]
     responses = [rec["response"] for rec in ordered]
     correct = [bool(rec["correct"]) for rec in ordered]
@@ -205,6 +220,26 @@ def main() -> int:
     }
     summary_path.write_text(json.dumps(summary, indent=2))
     print(json.dumps(summary, indent=2))
+    return summary
+
+
+def main() -> int:
+    args = parse_args()
+    run_validation(
+        split=args.split,
+        run_id=args.run_id,
+        backend=args.backend,
+        n_mcq=args.n_mcq,
+        n_free=args.n_free,
+        max_retries=args.max_retries,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        top_k=args.top_k,
+        seed=args.seed,
+        primary_prompt=args.primary_prompt,
+        retry_prompt=args.retry_prompt,
+        limit=args.limit,
+    )
     return 0
 
 

@@ -1,8 +1,13 @@
 # DSMLP GPU Workflow
 
+**Gradescope verification:** run `python run_inference.py` inside the GPU pod.
+See the root [`README.md`](../README.md) for full reproduction instructions.
+
+Optional notebook: [`competition_pipeline.ipynb`](../competition_pipeline.ipynb)
+(wraps the same `run_inference()` function).
+
 All inference for the CSE 151B competition must run inside a DSMLP GPU
-container. The plan explicitly forbids running Qwen3-4B locally or on
-`dsmlp-login.ucsd.edu`.
+container. Do not run Qwen3-4B locally or on `dsmlp-login.ucsd.edu`.
 
 ## 1. SSH to the submission host
 
@@ -126,14 +131,13 @@ script will fail fast on the wrong host.
 
 ```bash
 source .venv/bin/activate
-python scripts/run_validation.py --split results/validation/split.jsonl --run_id run01
-python scripts/build_submission.py --test data/private.jsonl --out submission.csv
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+python run_inference.py
 ```
 
-`build_submission.py` is the only script that should ever read
-`data/private.jsonl`. It writes `id,response` for every test row,
-includes the full reasoning trace per the Kaggle spec, and checks the
-final file before exit.
+`run_inference()` is the single Gradescope entry point: it loads the model,
+runs the private set, applies all post-processing, and writes `submission.csv`.
 
 ## 6. Copy results back to your laptop
 

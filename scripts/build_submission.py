@@ -51,15 +51,17 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from qwen3_comp.data import load_jsonl  # noqa: E402
 from qwen3_comp.extract import extract_boxed_content  # noqa: E402
+from qwen3_comp.inference_config import FINAL_INFERENCE_DEFAULTS  # noqa: E402
 from qwen3_comp.self_consistency import (  # noqa: E402
     SamplingConfig,
     generate_with_retry_and_vote,
     post_hoc_sanity,
 )
-from qwen3_comp.vllm_runtime import MODEL_ID, VLLMEngine  # noqa: E402
+from qwen3_comp.vllm_runtime import VLLMEngine  # noqa: E402
 
-EXPECTED_PRIVATE_ROWS = 943
-DEFAULT_BATCH_SIZE = 16
+EXPECTED_PRIVATE_ROWS = FINAL_INFERENCE_DEFAULTS["expected_rows"]
+DEFAULT_BATCH_SIZE = FINAL_INFERENCE_DEFAULTS["batch_size"]
+D = FINAL_INFERENCE_DEFAULTS
 
 
 def parse_args() -> argparse.Namespace:
@@ -68,7 +70,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--out", default="submission.csv")
     p.add_argument(
         "--model_id",
-        default=MODEL_ID,
+        default=D["model_id"],
         help=(
             "HuggingFace model or fine-tuned checkpoint to load. Defaults "
             "to the designated base model."
@@ -88,18 +90,18 @@ def parse_args() -> argparse.Namespace:
             "checkpoint"
         ),
     )
-    p.add_argument("--backend", choices=("vllm", "transformers"), default="vllm")
-    p.add_argument("--n_mcq", type=int, default=5)
-    p.add_argument("--n_free", type=int, default=3)
-    p.add_argument("--max_retries", type=int, default=1)
-    p.add_argument("--temperature", type=float, default=0.7)
-    p.add_argument("--top_p", type=float, default=0.95)
-    p.add_argument("--top_k", type=int, default=20)
-    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--backend", choices=("vllm", "transformers"), default=D["backend"])
+    p.add_argument("--n_mcq", type=int, default=D["n_mcq"])
+    p.add_argument("--n_free", type=int, default=D["n_free"])
+    p.add_argument("--max_retries", type=int, default=D["max_retries"])
+    p.add_argument("--temperature", type=float, default=D["temperature"])
+    p.add_argument("--top_p", type=float, default=D["top_p"])
+    p.add_argument("--top_k", type=int, default=D["top_k"])
+    p.add_argument("--seed", type=int, default=D["seed"])
     p.add_argument(
         "--gpu_memory_utilization",
         type=float,
-        default=0.75,
+        default=D["gpu_memory_utilization"],
         help=(
             "fraction of GPU memory vLLM may reserve for weights/KV cache; "
             "lower this if engine startup OOMs"
@@ -108,13 +110,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--max_model_len",
         type=int,
-        default=16384,
+        default=D["max_model_len"],
         help="maximum prompt + generation tokens for vLLM",
     )
     p.add_argument(
         "--max_num_seqs",
         type=int,
-        default=96,
+        default=D["max_num_seqs"],
         help=(
             "maximum simultaneous vLLM sequences; lower this if sampler "
             "warmup OOMs"
@@ -122,11 +124,12 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--enforce_eager",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=D["enforce_eager"],
         help="disable vLLM CUDA graph capture/torch compile warmup to reduce startup VRAM",
     )
-    p.add_argument("--primary_prompt", default="strict")
-    p.add_argument("--retry_prompt", default="commit_now")
+    p.add_argument("--primary_prompt", default=D["primary_prompt"])
+    p.add_argument("--retry_prompt", default=D["retry_prompt"])
     p.add_argument(
         "--resume_require_sane_boxed",
         action="store_true",
@@ -351,35 +354,44 @@ def _verify_csv(out_path: Path, items: list[dict], expected_rows: int) -> dict:
 
 def run_inference(
     *,
-    test_path: str | Path = "data/private.jsonl",
-    out_path: str | Path = "submission.csv",
-    responses_jsonl: str | Path = "results/submission/responses.jsonl",
-    model_id: str = MODEL_ID,
-    backend: str = "vllm",
-    batch_size: int = DEFAULT_BATCH_SIZE,
-    n_mcq: int = 5,
-    n_free: int = 3,
-    max_retries: int = 1,
-    temperature: float = 0.7,
-    top_p: float = 0.95,
-    top_k: int = 20,
-    seed: int = 0,
-    gpu_memory_utilization: float = 0.75,
-    max_model_len: int = 16384,
-    max_num_seqs: int = 96,
-    enforce_eager: bool = False,
-    primary_prompt: str = "strict",
-    retry_prompt: str = "commit_now",
-    expected_rows: int = EXPECTED_PRIVATE_ROWS,
-    skip_inference: bool = False,
-    resume_require_sane_boxed: bool = False,
+    test_path: str | Path = D["test_path"],
+    out_path: str | Path = D["out_path"],
+    responses_jsonl: str | Path = D["responses_jsonl"],
+    model_id: str = D["model_id"],
+    backend: str = D["backend"],
+    batch_size: int = D["batch_size"],
+    n_mcq: int = D["n_mcq"],
+    n_free: int = D["n_free"],
+    max_retries: int = D["max_retries"],
+    temperature: float = D["temperature"],
+    top_p: float = D["top_p"],
+    top_k: int = D["top_k"],
+    seed: int = D["seed"],
+    gpu_memory_utilization: float = D["gpu_memory_utilization"],
+    max_model_len: int = D["max_model_len"],
+    max_num_seqs: int = D["max_num_seqs"],
+    enforce_eager: bool = D["enforce_eager"],
+    primary_prompt: str = D["primary_prompt"],
+    retry_prompt: str = D["retry_prompt"],
+    expected_rows: int = D["expected_rows"],
+    skip_inference: bool = D["skip_inference"],
+    resume_require_sane_boxed: bool = D["resume_require_sane_boxed"],
 ) -> dict:
     """Run the full private-set pipeline and write the submission CSV.
 
-    This is intentionally the only production entry point: callers do not
-    need to run separate model-loading, generation, post-processing, or CSV
-    steps. Progress is committed to ``responses_jsonl`` after each batch so
-    a disconnected GPU session only loses the in-flight batch.
+    This is the single Gradescope entry point. One call performs:
+
+    1. Load ``model_id`` via vLLM (4-bit bitsandbytes, bfloat16).
+    2. Run inference on every row in ``data/private.jsonl`` with adaptive
+       token budgets, self-consistency voting, sanity-triggered retry, and
+       formatter repair (see ``src/qwen3_comp/self_consistency.py``).
+    3. Post-process responses (majority vote, boxed extraction, stage
+       metadata) and checkpoint progress to ``responses_jsonl``.
+    4. Write the final ``submission.csv`` (columns ``id,response``) and a
+       verification report JSON alongside it.
+
+    Re-run the same call to resume after a pod disconnect; completed ids in
+    ``responses_jsonl`` are skipped automatically.
     """
     test_path = Path(test_path)
     out_path = Path(out_path)
