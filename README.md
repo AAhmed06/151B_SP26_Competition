@@ -9,9 +9,9 @@ Unified-accuracy submission using **Qwen/Qwen3-4B-Thinking-2507** (designated ba
 | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | **GPU**                   | NVIDIA **A30** (24 GB VRAM, Ampere) on UCSD DSMLP                                                                                      |
 | **Launch**                | `bash dsmlp/launch_gpu.sh` (1 GPU, 8 CPU, 32 GB RAM)                                                                                   |
-| **Approx. wall time**     | **3–4 hours** for all 943 private questions (`batch_size=64`, including primary generation, sanity-triggered retry, and repair passes) |
+| **Approx. wall time**     | **6–8 hours** for all 943 private questions (`batch_size=64`, including primary generation, sanity-triggered retry, and repair passes) |
 | **Engine**                | vLLM 0.8.5.post1, 4-bit bitsandbytes quantization, bfloat16                                                                            |
-| **Reported Kaggle score** | Unified accuracy **~0.636** (stochastic; re-runs may vary slightly)                                                                    |
+| **Reported Kaggle score** | Unified accuracy **0.660** (stochastic; re-runs may vary slightly)                                                                      |
 
 
 ---
@@ -105,7 +105,7 @@ All defaults used for our submission are defined in `[src/qwen3_comp/inference_c
 | `n_mcq` / `n_free`                | `5` / `3`                     |
 | `max_retries`                     | `1`                           |
 | `primary_prompt` / `retry_prompt` | `strict` / `commit_now`       |
-| `temperature` / `top_p` / `top_k` | `0.7` / `0.95` / `20`         |
+| `temperature` / `top_p` / `top_k` | `0.6` / `0.95` / `20`         |
 | `seed`                            | `0`                           |
 | `max_model_len`                   | `16384`                       |
 | `max_num_seqs`                    | `96`                          |
@@ -113,7 +113,7 @@ All defaults used for our submission are defined in `[src/qwen3_comp/inference_c
 | `enforce_eager`                   | `True`                        |
 
 
-Sampling is stochastic (`temperature=0.7`). Outputs are not byte-identical across re-runs, but overall accuracy should stay consistent with our submission.
+Sampling is stochastic (`temperature=0.6`). Outputs are not byte-identical across re-runs, but overall accuracy should stay consistent with our submission.
 
 ---
 

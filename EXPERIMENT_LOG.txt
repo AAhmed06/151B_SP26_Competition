@@ -1,6 +1,6 @@
 CSE 151B SP26 Math Reasoning Competition — Experiment & Run Log
 ================================================================
-Last updated: 2026-05-29 (pipeline v2: sanity-triggered retry/repair)
+Last updated: 2026-05-30 (Run 7: doubled budgets + stronger prompts; Kaggle 0.660)
 Pod: ala023-3776691 (DSMLP GPU; A30/A5000 class, 24GB)
 Repo: ~/151B_SP26_Competition on DSMLP
 
@@ -45,13 +45,13 @@ Default production settings (run_inference.py / run_validation.py):
 
   Retry:
     max_retries = 1
-    retry uses larger max_new_tokens (budget.py: 6144–8192)
+    retry uses larger max_new_tokens (budget.py: 8192–12288 as of b3)
     retry n = max(1, n_mcq or n_free // 2)
 
   Repair (repair_box prompt, low temperature):
-    MCQ: n=3 repair samples, max_new_tokens=256
-    Free-form single: n=2, max_new_tokens=512
-    Free-form multi-[ANS]: n=2, max_new_tokens=768
+    MCQ: n=3 repair samples, max_new_tokens=512 (increased in b3)
+    Free-form single: n=2, max_new_tokens=1024 (increased in b3)
+    Free-form multi-[ANS]: n=2, max_new_tokens=1024 (increased in b3)
     Draft for repair = latest sample (includes retry output if retry ran)
 
   Checkpoint metadata (per JSONL row):
@@ -59,7 +59,7 @@ Default production settings (run_inference.py / run_validation.py):
     (primary | retry | repair)
 
   Sampling:
-    temperature=0.7, top_p=0.95, top_k=20, seed=0
+    temperature=0.6, top_p=0.95, top_k=20, seed=0
 
   vLLM engine (vllm_runtime.py):
     quantization=bitsandbytes, dtype=bfloat16
@@ -68,10 +68,17 @@ Default production settings (run_inference.py / run_validation.py):
     backend=vllm (fallback: transformers + 4-bit)
     model_id default: Qwen/Qwen3-4B-Thinking-2507 (--model_id for HF checkpoint)
 
-  Token budgets (route_max_new_tokens, retry=0):
-    MCQ short/medium/long: 2048 / 3072 / 4096
-    Free-form: 2048–4096 by difficulty and [ANS] count
-    Retry: 6144 or 8192
+  Token budgets (route_max_new_tokens — branch b3, retry=0):
+    MCQ  short/medium/long: 4096 / 6144 / 8192  (was 2048/3072/4096)
+    Free short/medium/long: 4096 / 6144 / 8192  (was 2048/3072/4096)
+    Multi-[ANS] or long free: 8192
+    Retry: 8192 (medium/short) or 12288 (long)   (was 6144/8192)
+    Difficulty bump: short questions with hard-math keywords (probability,
+      combinat, integral, matrix, sequence, polynomial, etc.) → medium tier
+
+  Voting normalization (branch b3):
+    _float_canonical(): rounds pure decimal answers to 6 significant figures
+    so near-equal values (e.g. 442.857 vs 442.857142857) vote together
 
   Batching (2026-05-29 update):
     --batch_size N (default 16): pending rows processed in chunks of N
@@ -162,6 +169,19 @@ Issue H: Checkpoint path confusion → "0 done, 943 pending" (2026-05-29)
   Verify before run:
     wc -l results/submission/responses.jsonl.backup   # expect 943
 
+Issue I: Pod OOM exit code 137 on launch (2026-05-30)
+  Cause: Requested -m 32 but cluster was memory-constrained
+  Fix: launch with -m 24 instead:
+    K8S_TIMEOUT_SECONDS=43200 launch-scipy-ml.sh -g 1 -c 8 -m 24 -v a30
+
+Issue J: Pending pod blocking GPU quota (2026-05-30)
+  Symptoms: "GPU quota exceeded. Wanted 1 but with 1 already in use"
+  Cause: Old pod stuck in Pending state (never scheduled) still counts against quota
+  Fix:
+    kubectl get pods
+    kubectl delete pod <pod-name>
+    Then relaunch
+
 
 ================================================================
 4. LAUNCH & POD LIFETIME
@@ -177,6 +197,7 @@ GPU pod (used):
 Recommended for finish pod:
   K8S_TIMEOUT_SECONDS=43200 launch-scipy-ml.sh -g 1 -c 8 -m 32 -v a30
   (12 hours; launch_gpu.sh sets this via TIMEOUT_SECONDS)
+  If OOM: use -m 24 instead of -m 32
 
 A30 vs A5000:
   Both 24GB Ampere — fine for this 4B quantized job
@@ -187,6 +208,8 @@ tmux:
   Detach: Ctrl+b then :detach  (or Ctrl+b d; Jupyter may swallow Ctrl+b)
   Reattach: tmux attach -t submit
   Mac sleep: OK if job runs inside tmux on pod (SSH drop does not kill tmux server)
+  Note: tmux may not work if launched via Jupyter terminal ("open terminal failed")
+        In that case run inference directly and keep terminal open
 
 
 ================================================================
@@ -279,6 +302,27 @@ Run 6 — rerun no-box rows (attempted 2026-05-29)
   Failed: conda Python without .venv (Issue G) before batch 1 finished
   Status: COMPLETED on resume — see "Run 6 completion" entry below (+41 boxed, Kaggle 0.611)
 
+Run 7 — full fresh private rerun on branch b3 (2026-05-30)
+  Branch: b3 (doubled token budgets, float-aware voting, stronger prompts)
+  Pod: rdulgerian-929219 (A30 24GB); ran in two sessions due to pod timeout at batch 11/15
+  Command:
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python run_inference.py \
+      --test data/private.jsonl \
+      --out submission.csv \
+      --responses_jsonl results/submission/responses.jsonl \
+      --batch_size 64 \
+      --max_num_seqs 96 \
+      --enforce_eager
+  Result:
+    Checkpointed batch 15/15: 943/943 total in 2974.3s (final session)
+    submission verification:
+      rows=943, empty_responses=0
+      boxed_responses=793, boxed_rate=84.09%
+      sane_responses=774, sane_rate=82.08%
+      sanity_failures: 150 no_boxed_answer, 19 wrong_subanswer_count
+    improvement vs Run 6: boxed 702→793 (+91), rate 74.4%→84.1%
+  Kaggle score: 0.660 (best so far; prior best 0.621)
+
 
 ================================================================
 6. TIMING LESSONS (why full run >> initial estimate)
@@ -302,6 +346,7 @@ Rule of thumb after this project:
   - batch_size 943: ~2.5–3.5 h but one pod death loses entire in-flight chunk
   - Retry pass per batch is slow (~7.5 min) even when primary is ~5 min
   - vLLM progress: fast primary bar then slow retry bar is EXPECTED behavior
+  - With doubled budgets (b3): expect ~2x wall time vs original budgets
 
 
 ================================================================
@@ -322,8 +367,7 @@ python scripts/build_validation_split.py --out results/validation/mini.jsonl \
   --n_mcq 5 --n_free_single 8 --n_free_multi 2
 python scripts/run_validation.py --split results/validation/mini.jsonl --run_id mini_a30
 
-# Full submission (preferred entry point)
-tmux new -s submit
+# Full submission (preferred entry point — branch b3)
 source .venv/bin/activate
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python run_inference.py \
@@ -416,7 +460,7 @@ Pitfall: filtering checkpoint to "boxed only" then wondering why CSV has empty r
 
 
 ================================================================
-9. QUALITY / PROMPT NOTES (from milestone + mini)
+9. QUALITY / PROMPT NOTES (from milestone + mini + runs)
 ================================================================
 
 - Main failure mode at low budget: truncation before \boxed{}
@@ -426,13 +470,11 @@ Pitfall: filtering checkpoint to "boxed only" then wondering why CSV has empty r
 - MCQ: vote on letter inside \boxed{}
 - Free-form: comma-separated subanswers in one \boxed{} matching [ANS] order
 - Mini 86.7% boxed < 95% script warning threshold — expect some empty/bad rows
-- Full private run after Run 6: 702/943 boxed (74.4%); latest rerun_sane audit: 728/943
-  boxed (~77%), 215 unboxed; 635/943 sane+voteable from dry-run filter
-- 282 no_boxed_answer: truncation mid-reasoning, rarely complete \boxed{}
-- 17 empty_boxed_answer: \boxed literal in text but truncated before closing brace
-- 9 wrong_subanswer_count: comma grouping wrong for multi-[ANS] (e.g. 41,35,16 x4 ids)
+- Run 7 (branch b3): 793/943 boxed (84.1%), 774/943 sane (82.1%); 150 unboxed
+- 150 no_boxed_answer remaining: truncation mid-reasoning (budget increase helped a lot)
+- 19 wrong_subanswer_count: comma grouping wrong for multi-[ANS]
 - Filter for rerun: use rec.get("boxed") truthy, NOT "is not None" (keeps empty strings)
-- Numerical near-misses may score wrong (e.g. 442.86 vs 442.857...) — judger strictness
+- Numerical near-misses addressed in b3 via _float_canonical() in normalize_answer
 
 Done in pipeline v2 (2026-05-29):
   - Sanity-triggered retry/repair (not vote-key-only)
@@ -440,8 +482,17 @@ Done in pipeline v2 (2026-05-29):
   - Per-row stage metadata + sane_rate in submission.verification.json
   - metrics.py uses bracket-aware split_box_subanswers for diagnostics
 
+Done in branch b3 (2026-05-30):
+  - Doubled primary token budgets (2048/3072/4096 → 4096/6144/8192)
+  - Increased retry budgets (6144/8192 → 8192/12288)
+  - Keyword-based difficulty bump for short hard-math questions
+  - Float-aware voting (_float_canonical, 6 sig figs)
+  - Truncation-defence wording in all system prompts
+  - Repair pass budget increased (256/512 → 512/1024)
+
 Future improvements (next iteration):
-  - Failure-specific retries (no_box vs wrong_subanswer_count) with custom budgets
+  - Rerun 150 still-unboxed rows with commit_now + repair at max budget
+  - Failure-specific retries for wrong_subanswer_count (targeted multi-[ANS] repair)
   - Two-stage: solve then deterministic format-only extractor prompt
   - Optional: strip Qwen thinking tags before extract (align with judger)
   - QLoRA format SFT only if inference recovery plateaus (see scripts/train_qlora.py)
@@ -464,8 +515,8 @@ Future improvements (next iteration):
   results/submission/responses_rerun.jsonl — Run 6 base (644 boxed-only kept)
   results/submission/responses_rerun_sane.jsonl — sane_boxed filter; base for Run 7
   responses.jsonl (repo root)         — filtered 661-row subset (local only; not on pod)
-  submission.csv                      — final Kaggle file (943 rows, ~6.3 MB multiline)
-  submission.verification.json        — row/boxed checks
+  submission.csv                      — final Kaggle file (943 rows, ~9.9 MB multiline)
+  submission.verification.json        — row/boxed/sane checks
 
 
 ================================================================
@@ -474,13 +525,15 @@ Future improvements (next iteration):
 
 [x] Full submission completes (943 lines in responses.jsonl.backup)
 [x] submission.csv structurally valid (943 rows, 0 empty, header id,response)
-[ ] boxed_rate >= 95% (currently ~77% after Run 6; 215 unboxed in rerun_sane audit)
-[x] Upload to Kaggle (best score so far: 0.621; prior 0.611 after Run 6)
+[ ] boxed_rate >= 95% (currently 84.1% after Run 7; 150 unboxed remaining)
+[x] Upload to Kaggle (best score so far: 0.660; prior 0.621 after Run 6)
 [x] Run 6 rerun complete (299 no-box rows with commit_now on .venv python)
 [x] Record final wall time for Run 6 after resume
 [x] Implement repair pass + sane-only resume criteria in pipeline (v2, 2026-05-29)
-[ ] Run 7: rerun ~215–308 insane/unboxed rows with pipeline v2 + --resume_require_sane_boxed
-[ ] Optional: mini/150 validation sweep before full private rerun (commit_now, n_mcq=7)
+[x] Run 7: full fresh private rerun on branch b3 with doubled budgets + stronger prompts
+[ ] Rerun 150 still-unboxed rows from Run 7 with max budget + commit_now
+[ ] Fix wrong_subanswer_count rows with targeted multi-[ANS] repair prompt
+[ ] Optional: mini/150 validation sweep to measure accuracy (not just boxed rate)
 [ ] Optional: QLoRA only if boxed_rate plateaus above 90% but accuracy stalls
 
 ---
@@ -565,5 +618,39 @@ Validation plan before next long private rerun:
       --batch_size 64 --primary_prompt commit_now --retry_prompt commit_now \
       --n_mcq 7 --n_free 3 --enforce_eager --max_num_seqs 96 \
       --resume_require_sane_boxed
-  Status: CODE READY — awaiting GPU validation + private rerun
 
+2026-05-30 — Branch b3: doubled budgets + stronger prompts + float voting
+  Code changes (branch b3; deployed to DSMLP via git checkout b3):
+    src/qwen3_comp/budget.py
+      - Primary budgets doubled: 2048→4096, 3072→6144, 4096→8192 (all types)
+      - Retry budgets increased: 6144→8192 (short/medium), 8192→12288 (long)
+      - Keyword-based difficulty bump: short questions with hard-math keywords
+        (probability, combinat, integral, matrix, sequence, polynomial, etc.)
+        bumped to medium tier automatically
+    src/qwen3_comp/self_consistency.py
+      - _float_canonical(): 6-sig-fig decimal normalisation for majority voting
+        (e.g. 442.857 and 442.857142857 now vote together)
+      - Repair pass budget increased: MCQ 256→512, free 512/768→1024
+    src/qwen3_comp/prompts.py
+      - All strict/commit_now prompts include truncation-defence wording:
+        "if running low on space, stop and write \\boxed{} now"
+
+2026-05-30 — Run 7 results
+  Command:
+      PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python run_inference.py \
+        --test data/private.jsonl \
+        --out submission.csv \
+        --responses_jsonl results/submission/responses.jsonl \
+        --batch_size 64 \
+        --max_num_seqs 96 \
+        --enforce_eager
+  Pod: rdulgerian-929219 (A30 24GB); two sessions (pod timed out at batch 11/15)
+  Result:
+      Checkpointed batch 15/15: 943/943 total
+      submission verification:
+        rows=943, empty_responses=0
+        boxed_responses=793, boxed_rate=84.09%
+        sane_responses=774, sane_rate=82.08%
+        sanity_failures: 150 no_boxed_answer, 19 wrong_subanswer_count
+      improvement vs Run 6: boxed 702→793 (+91), rate 74.4%→84.1%
+  Kaggle score: 0.660 (best so far; prior best 0.621)
