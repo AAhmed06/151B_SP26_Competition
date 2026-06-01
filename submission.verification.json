@@ -5,7 +5,26 @@
     "response"
   ],
   "empty_responses": 0,
-  "boxed_responses": 661,
-  "boxed_rate": 0.7009544008483564,
+  "boxed_responses": 793,
+  "boxed_rate": 0.8409331919406151,
+  "sane_responses": 774,
+  "sane_rate": 0.8207847295864263,
+  "sanity_failures": {
+    "no_boxed_answer": 150,
+    "wrong_subanswer_count:4!=2": 2,
+    "wrong_subanswer_count:2!=4": 1,
+    "wrong_subanswer_count:3!=2": 3,
+    "wrong_subanswer_count:1!=8": 1,
+    "wrong_subanswer_count:1!=2": 1,
+    "wrong_subanswer_count:5!=4": 1,
+    "wrong_subanswer_count:1!=4": 2,
+    "wrong_subanswer_count:3!=4": 1,
+    "wrong_subanswer_count:1!=5": 2,
+    "wrong_subanswer_count:5!=2": 1,
+    "wrong_subanswer_count:12!=4": 1,
+    "wrong_subanswer_count:1!=12": 1,
+    "wrong_subanswer_count:1!=6": 1,
+    "wrong_subanswer_count:4!=3": 1
+  },
   "issues": []
 }

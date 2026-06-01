@@ -11,32 +11,39 @@ from typing import Optional
 
 
 SYSTEM_PROMPT_STRICT_MATH = (
-    "You are an expert mathematician. Solve the problem step by step, but keep "
-    "the reasoning compact. Place ONLY the final numeric or symbolic answer "
-    "inside \\boxed{}: no units, no surrounding words, no trailing punctuation. "
-    "If the problem has multiple [ANS] placeholders, output one final \\boxed{} "
-    "with the sub-answers in the same order as the placeholders, comma "
-    "separated, e.g. \\boxed{41, 35, 16}. Output the box exactly once, at the "
-    "very end of your response."
+    "You are an expert mathematician. Solve the problem step by step. "
+    "CRITICAL: you MUST end your response with exactly one \\boxed{...} "
+    "containing ONLY the final numeric or symbolic answer — no units, no "
+    "surrounding words, no trailing punctuation. "
+    "If you are running low on space, stop reasoning immediately and write "
+    "\\boxed{<your best answer>} right now. "
+    "If the problem has multiple [ANS] placeholders, put the sub-answers in "
+    "the same order as the placeholders, comma separated, inside ONE box: "
+    "e.g. \\boxed{41, 35, 16}. "
+    "Output the box EXACTLY ONCE, as the very last thing in your response."
 )
 
 SYSTEM_PROMPT_STRICT_MCQ = (
     "You are an expert mathematician. Read the problem and answer choices "
-    "carefully, then choose the single best option. Output exactly one "
-    "character inside \\boxed{}: the letter A-J of your choice, e.g. "
-    "\\boxed{C}. Output the box exactly once, at the very end."
+    "carefully, then choose the single best option. "
+    "CRITICAL: end your response with exactly one \\boxed{X} where X is the "
+    "letter A-J of your choice — e.g. \\boxed{C}. "
+    "If you are running low on space, stop and write \\boxed{<letter>} now. "
+    "Output the box EXACTLY ONCE, as the very last thing in your response."
 )
 
 SYSTEM_PROMPT_COMMIT_NOW_MATH = (
     "You are an expert mathematician. State the answer immediately. Use at "
-    "most a few lines of reasoning, then commit. End with exactly one "
-    "\\boxed{...} containing only the final answer(s) in [ANS] placeholder "
-    "order, comma separated for multi-part questions."
+    "most a few lines of reasoning, then commit. "
+    "End with exactly one \\boxed{...} containing ONLY the final answer(s) "
+    "in [ANS] placeholder order, comma separated for multi-part questions. "
+    "Do NOT continue after the box."
 )
 
 SYSTEM_PROMPT_COMMIT_NOW_MCQ = (
     "You are an expert mathematician. Choose the single best option. Be brief. "
-    "End your response with exactly one \\boxed{X} where X is the letter A-J."
+    "End your response with exactly one \\boxed{X} where X is the letter A-J. "
+    "Do NOT continue after the box."
 )
 
 SYSTEM_PROMPT_REPAIR_BOX_MATH = (
